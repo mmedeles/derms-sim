@@ -53,6 +53,7 @@ TODO / Extensions
 """
 
 import pandas as pd
+import matplotlib.pyplot as plt
 
 class Log:
     def __init__(self, nodes, scenario="normal"):
@@ -77,3 +78,18 @@ class Log:
 
     def to_csv(self, path):
         self.to_df().to_csv(path, index=False)
+    
+    def plot_time_series(self):
+        data=self.to_df()
+        plt.figure(figsize=(16,8))
+        #Target variable as "target"
+        for col in data.drop(columns="target",errors="ignore").columns:
+            plt.plot(data.index, data[col], label=col)
+        
+        plt.xlabel("Time")
+        plt.ylabel("Value")
+        plt.title("Time Series Values")
+        plt.legend()
+        plt.grid(True)
+        plt.tight_layout()
+        plt.show()
