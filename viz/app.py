@@ -17,7 +17,7 @@ Key behaviours
 
 How to run
 ----------
-# From project root:
+From project root:
 python -m viz.app
 
 Then open browser at http://127.0.0.1:8050
