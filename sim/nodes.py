@@ -54,7 +54,7 @@ Testing
 
 TODO / Extensions
 -----------------
-- Add more detailed physics-based models or curve fittings for PV / wind.
+- Add more detailed physics-based models or curve fittings for PV / wind?
 - Add event injection hooks (e.g., disconnects, cloud cover shadows).
 - Support scenario playback (replay deterministic sequences).
 """
@@ -82,7 +82,7 @@ class DERNode:
 
         self.t += dt
 
-        # --- Active power profile (very simple shapes per type) ---
+        # Active power profile (very simple shapes per type)
         if self.kind == "solar":
             # diurnal shape: sine on [0,1], clipped at night; plus noise
             day = (math.sin((self.t % 86400) / 86400 * math.pi) + 0.0)
@@ -100,7 +100,7 @@ class DERNode:
         else:
             p = self.base_p_kw
 
-        # --- Voltage & frequency small noise around nominal ---
+        # Voltage & frequency small noise around nominal
         v = 1.0 + random.uniform(-0.01, 0.01)
         f = 60.0 + random.uniform(-0.02, 0.02)
 
