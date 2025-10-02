@@ -1,10 +1,12 @@
 # Existing runtime libs
 numpy
-pandas
-dash
-plotly
+pandas~=2.3.3
+dash~=3.2.0
+plotly~=6.3.0
 
 # Recommended additions for next stages (MQTT, attacker, detector, evaluation)
 paho-mqtt        # lightweight MQTT client for Python
 scikit-learn     # detection models (IsolationForest, LOF)
 pyyaml           # for attacker config files (attacks.yml)
+
+matplotlib~=3.10.6
