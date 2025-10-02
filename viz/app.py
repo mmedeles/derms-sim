@@ -32,7 +32,7 @@ Public functions / objects
 Common changes for demo
 -----------------------
 - Add a command-line flag `--mqtt` to switch between local simulation and MQTT
-  subscription mode.
+  subscription mode (to be added!).
 - Add a configuration option to select nodes to display and history length.
 
 Testing
