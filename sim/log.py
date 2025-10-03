@@ -54,6 +54,7 @@ TODO / Extensions
 
 import pandas as pd
 import matplotlib.pyplot as plt
+from typing import List
 
 class Log:
     def __init__(self, nodes, scenario="normal"):
@@ -79,12 +80,12 @@ class Log:
     def to_csv(self, path):
         self.to_df().to_csv(path, index=False)
     
-    def plot_time_series(self):
+    def plot_time_series(self,columns: List):
         data=self.to_df()
         plt.figure(figsize=(16,8))
-        #Target variable as "target"
-        for col in data.drop(columns=["time","target","scenario"],errors="ignore").columns:
-            plt.plot(data.index, data[col], label=col)
+        #Target variable as "target" or "scenario"
+        for col in columns:
+            plt.plot(data.time, data[col], label=col)
         
         plt.xlabel("Time")
         plt.ylabel("Value")
@@ -92,4 +93,5 @@ class Log:
         plt.legend()
         plt.grid(True)
         plt.tight_layout()
+        plt.xticks(data.time[::100]) #x tick label every 100 values
         plt.show()
