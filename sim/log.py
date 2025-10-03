@@ -83,7 +83,7 @@ class Log:
         data=self.to_df()
         plt.figure(figsize=(16,8))
         #Target variable as "target"
-        for col in data.drop(columns=["target","scenario"],errors="ignore").columns:
+        for col in data.drop(columns=["time","target","scenario"],errors="ignore").columns:
             plt.plot(data.index, data[col], label=col)
         
         plt.xlabel("Time")
