@@ -80,8 +80,10 @@ class Log:
     def to_csv(self, path):
         self.to_df().to_csv(path, index=False)
     
-    def plot_time_series(self,columns: List):
+    def plot_time_series(self,columns: List,tail=None):
         data=self.to_df()
+        if tail: #subset most recent n rows
+            data=data.tail(tail)
         plt.figure(figsize=(16,8))
         #Target variable as "target" or "scenario"
         for col in columns:
@@ -93,5 +95,5 @@ class Log:
         plt.legend()
         plt.grid(True)
         plt.tight_layout()
-        plt.xticks(data.time[::100]) #x tick label every 100 values
+        plt.xticks(data.time[::int(len(data)/5)+1]) #x tick label spacing
         plt.show()
