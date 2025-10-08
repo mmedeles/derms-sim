@@ -138,11 +138,10 @@ class SolarNode(DERNode):
     
     def step(self,dt: int =1):
         """Advance one timestep and update P/V/f with simple, plausible patterns."""
-        p = self.W_from_sec(self.t)
         self.t += dt
         
-        v = 1.0 + random.uniform(-0.01, 0.01)
-        #PhVphA is mean 239.6 std 2.38, somewhat gaussian
+        p = self.W_from_sec(self.t)
+        v = 1.0 + random.uniform(-0.01, 0.01) #PhVphA is mean 239.6 std 2.38, somewhat gaussian
         
         if self.t%86400>self.sunrise and self.t%86400<self.sunset: #if its daytime
             f = 59.996 + np.random.normal(0,0.017)
