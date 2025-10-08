@@ -62,7 +62,7 @@ TODO / Extensions
 from dataclasses import dataclass
 import math, random
 from typing import Optional
-
+import numpy as np
 @dataclass
 class DERNode:
     name: str
@@ -74,7 +74,9 @@ class DERNode:
     # internal state
     t: int = 0                # seconds since start
     _drift: float = 0.0       # used later for attacks
-
+    
+    
+    
     def step(self, dt: int = 1, seed: Optional[int] = None):
         """Advance one timestep and update P/V/f with simple, plausible patterns."""
         if seed is not None:
@@ -87,6 +89,8 @@ class DERNode:
             # diurnal shape: sine on [0,1], clipped at night; plus noise
             day = (math.sin((self.t % 86400) / 86400 * math.pi) + 0.0)
             p = max(0.0, day) * self.base_p_kw + random.uniform(-0.1, 0.1)
+            
+            
         elif self.kind == "wind":
             # slow varying gusts
             p = self.base_p_kw + 0.5*math.sin(self.t/120) + random.uniform(-0.2, 0.2)
@@ -114,3 +118,43 @@ class DERNode:
             "F": self.freq_hz,
             "t": self.t
         }
+
+class SolarNode(DERNode):
+    def __init__(self,name):
+        super().__init__(name,"solar")
+        self.sunrise=23750 #approx
+        self.sunset=62700
+        
+    def W_from_sec(self,sec): #this function predicts W based on time of day based on solar data from prakash #seconds must start at 0 at a midnight
+        sec=sec%86400
+        peak=8888 #max of average day line
+        if sec<self.sunrise or sec>self.sunset:
+            return 0
+        a = abs(42500-sec)
+        p=1.7
+        W = peak*(math.sin(math.pi*(sec-self.sunrise)/(self.sunset-self.sunrise))**p)
+        #random variance adjust coming later
+        return W  
+    
+    def step(self,dt: int =1):
+        """Advance one timestep and update P/V/f with simple, plausible patterns."""
+        p = self.W_from_sec(self.t)
+        self.t += dt
+        
+        v = 1.0 + random.uniform(-0.01, 0.01)
+        #PhVphA is mean 239.6 std 2.38, somewhat gaussian
+        
+        if self.t%86400>self.sunrise and self.t%86400<self.sunset: #if its daytime
+            f = 59.996 + np.random.normal(0,0.017)
+        else:
+            f=0
+        # assign
+        self.v_pu, self.freq_hz, self.base_p_kw = round(v,4), round(f,4), round(p,4)
+    
+        return {
+                "id": self.name,
+                "P": self.base_p_kw,
+                "V": self.v_pu,
+                "F": self.freq_hz,
+                "t": self.t
+            }        
