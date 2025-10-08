@@ -68,12 +68,12 @@ Development notes
 
 import argparse
 from datetime import datetime, timedelta
-from sim.nodes import DERNode
+from sim.nodes import DERNode, SolarNode
 from sim.log import Log
 
 def main(a):
     nodes = [
-        DERNode("solar1", "solar", base_p_kw=5.0),
+        SolarNode("solar1"),
         DERNode("wind1",  "wind",  base_p_kw=4.0),
         DERNode("bat1",   "battery", base_p_kw=2.5),
         DERNode("ev1",    "ev",    base_p_kw=7.0),
@@ -82,7 +82,7 @@ def main(a):
     now = datetime.utcnow()
 
     # simulate N points at step seconds
-    for i in range(a.points):
+    for i in range(0,a.points,a.step):
         for n in nodes:
             n.step(dt=a.step)
         ts = now + timedelta(seconds=i*a.step)
@@ -95,8 +95,8 @@ def main(a):
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
-    p.add_argument("--points", type=int, default=600, help="number of samples")
-    p.add_argument("--step", type=int, default=1, help="seconds between samples")
+    p.add_argument("--points", type=int, default=500000, help="number of samples")
+    p.add_argument("--step", type=int, default=1000, help="seconds between samples")
     p.add_argument("--out", type=str, default="sim_output.csv")
     args = p.parse_args()
     main(args)
