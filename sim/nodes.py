@@ -118,35 +118,77 @@ class DERNode:
             "F": self.freq_hz,
             "t": self.t
         }
-
+class Cloud:
+    def __init__(self):
+        rng=np.random.default_rng(0)
+        mu=5
+        sig=4
+        self.duration = int(rng.lognormal(mu,sig))
+        self.fractional = max(min(np.random.normal(.5,.25),0.99),0.05)
+    def step(self):
+        self.duration-=1
+        if self.duration==0:
+            return self.fractional,True
+        else:
+            return self.fractional,False
 class SolarNode(DERNode):
     def __init__(self,name):
         super().__init__(name,"solar")
         self.sunrise=23750 #approx
         self.sunset=62700
+        self.cloud=None
+        self.day_cloudiness=200 #100 very cloud, 1000 not too cloudy 10000+ very clear
         
     def W_from_sec(self,sec): #this function predicts W based on time of day based on solar data from prakash #seconds must start at 0 at a midnight
         sec=sec%86400
-        peak=8888 #max of average day line
         if sec<self.sunrise or sec>self.sunset:
             return 0
-        a = abs(42500-sec)
-        p=1.7
-        W = peak*(math.sin(math.pi*(sec-self.sunrise)/(self.sunset-self.sunrise))**p)
-        #random variance adjust coming later
-        return W  
+        
+        peak=9333 #max of average day line
+        return max(peak*(math.sin(math.pi*(sec-self.sunrise)/(self.sunset-self.sunrise))**1.7)  + np.random.normal(0,8), 0)
     
+    def make_cloud(self):
+        if random.randint(1,self.day_cloudiness) ==1:
+            self.cloud=Cloud()
+    def change_cloudiness(self):
+        roll = random.randint(0,9)
+        if roll<5:
+            self.day_cloudiness=20000
+        elif roll<6:
+            self.day_cloudiness=10000
+        elif roll<7:
+            self.day_cloudiness=5000
+        elif roll<8:
+            self.day_cloudiness=1000
+        elif roll<9:
+            self.day_cloudiness=200    
+        elif roll<10:
+            self.day_cloudiness=100
     def step(self,dt: int =1):
         """Advance one timestep and update P/V/f with simple, plausible patterns."""
         self.t += dt
         
+        if random.randint(0,45000) == 0: #~ twice a day change to a different level of cloudiness
+            self.change_cloudiness()
+        
+        
         p = self.W_from_sec(self.t)
-        v = 1.0 + random.uniform(-0.01, 0.01) #PhVphA is mean 239.6 std 2.38, somewhat gaussian
+        v = 1.0 + random.uniform(-0.01, 0.01)
+        #PhVphA is mean 239.6 std 2.38, somewhat gaussian
         
         if self.t%86400>self.sunrise and self.t%86400<self.sunset: #if its daytime
             f = 59.996 + np.random.normal(0,0.017)
         else:
             f=0
+            
+        if self.cloud==None:
+            self.make_cloud()
+        else:
+            frac,expire = self.cloud.step()
+            if expire:
+                self.cloud=None
+            p=p*frac
+            
         # assign
         self.v_pu, self.freq_hz, self.base_p_kw = round(v,4), round(f,4), round(p,4)
     
@@ -156,4 +198,4 @@ class SolarNode(DERNode):
                 "V": self.v_pu,
                 "F": self.freq_hz,
                 "t": self.t
-            }        
+            }          
