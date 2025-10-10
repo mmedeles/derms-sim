@@ -1,0 +1,24 @@
+# Maps your inverter dataset columns to the canonical schema used by the project.
+# Based on the PDF header & rows: fields include W (real power, watts),
+# PhVphA (phase voltage), TmsHz (frequency), and time (timestamp with -06:00).
+# See sample lines in the PDF.
+# (If your real CSV uses slightly different names, just edit these four.)
+map:
+  timestamp: "time"
+  power_w: "W"
+  voltage: "PhVphA"
+  frequency_hz: "TmsHz"
+
+# Optional / convenience defaults for fields not present in the raw dataset.
+defaults:
+  node_id: "inverter_1"
+  type: "solar"
+
+# Timestamp parsing controls
+time:
+  parse_format: "%Y-%m-%d %H:%M:%S%z"   # example: 2024-02-22 13:33:33-06:00
+  to_utc: true                          # convert to UTC
+  iso: true                             # emit ISO-8601 (e.g., 2024-02-22T19:33:33Z)
+
+# Output file name (can be overridden via CLI)
+output: "data/normalized.csv"
