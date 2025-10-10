@@ -1,148 +1,268 @@
 """
-Dash-based visualization / local simulator.
+Dash visualization that CONSUMES live telemetry over MQTT.
 
-Purpose
--------
-A minimal Dash app that runs a local instance of the DER simulation and
-renders live plots and basic status indicators. In the initial prototype the
-visualization drives the simulation locally; in the full pipeline the viz will
-subscribe to MQTT topics instead and become a consumer-only visualization layer.
+- Subscribes to:
+    derms/+/telemetry   (canonical schema: timestamp,node_id,type,power_kw,voltage,frequency_hz)
+    derms/+/anomaly     (optional)
 
-Key behaviours
--------------
-- Creates the same types of DERNode objects used by sim/run_sim.py.
-- Advances the node states on a Dash interval (default 1s) and updates plots.
-- Shows recent history for a selected node and a simple textual alert when
-  certain thresholds are exceeded.
+- Shows:
+    * Node selector (auto-discovers node_ids)
+    * Live graphs: Power (kW), Voltage (V), Frequency (Hz)
+    * Simple anomaly banner
 
-How to run
-----------
-From project root:
-python -m viz.app
-
-Then open browser at http://127.0.0.1:8050
-
-Public functions / objects
---------------------------
-- create_app() -> dash.Dash (optional)
-    If present, helps unit-testing the layout and callbacks without running the
-    server. If your code already instantiates app at module-level, consider
-    exporting `app` and `server` for deployability.
-
-Common changes for demo
------------------------
-- Add a command-line flag `--mqtt` to switch between local simulation and MQTT
-  subscription mode (to be added!).
-- Add a configuration option to select nodes to display and history length.
-
-Testing
--------
-- Dash UI tests are typically end-to-end (Selenium or Playwright). For unit
-  tests, assert that callbacks produce correct transformed data given
-  deterministic node step outputs (use fixed seeds).
+Run:
+    python -m viz.app
+    # open http://127.0.0.1:8050
 """
 
+from __future__ import annotations
+import os
+import json
+import threading
+from collections import deque, defaultdict
+from datetime import datetime
+from typing import List, Tuple
+
 import dash
-from dash import dcc, html, Output, Input, State
+from dash import dcc, html, Input, Output, State
 import plotly.graph_objs as go
-import pandas as pd
-import time
-from collections import deque
 
-from sim.nodes import DERNode
-from sim.log import Log
+# ------------------------------------------------------------------------------
+# MQTT consumer setup
+# ------------------------------------------------------------------------------
+try:
+    from comm.mqtt_client import MQTTClient
+except Exception:
+    MQTTClient = None  # UI will still load; we'll show status = Unavailable.
 
-# Config
-NODES = [
-    DERNode("solar1", "solar", base_p_kw=5.0),
-    DERNode("wind1",  "wind",  base_p_kw=4.0),
-    DERNode("bat1",   "battery", base_p_kw=2.5),
-    DERNode("ev1",    "ev",    base_p_kw=7.0),
-]
-SAMPLE_INTERVAL_MS = 1000  # dashboard update every 1s
-HISTORY_POINTS = 120  # seconds worth of history on the chart
+MQTT_HOST = os.getenv("MQTT_HOST", "localhost")
+# how many points to keep per node in memory and to plot
+HISTORY_POINTS = int(os.getenv("HISTORY_POINTS", "1200"))
+PLOT_POINTS = int(os.getenv("PLOT_POINTS", "300"))  # show last N on each refresh
 
-# runtime state
-log = Log(NODES, scenario="live")
-# keep recent history per node for charting
-history = {n.name: deque(maxlen=HISTORY_POINTS) for n in NODES}
-time_history = deque(maxlen=HISTORY_POINTS)
+# Global buffers (in-memory, process-local)
+BUFFER = defaultdict(lambda: deque(maxlen=HISTORY_POINTS))     # node_id -> deque of telemetry dicts
+ANOMALIES = defaultdict(lambda: deque(maxlen=HISTORY_POINTS))  # node_id -> deque of anomaly dicts
+KNOWN_NODES = set()
 
+
+def _start_mqtt():
+    """Background MQTT subscriber thread that fills BUFFER and ANOMALIES."""
+    if MQTTClient is None:
+        print("[viz] MQTTClient not available; cannot subscribe to MQTT.")
+        return
+
+    mqc = MQTTClient(client_id="viz_ui", host=MQTT_HOST)
+
+    # ONE global handler to avoid overwriting on_message with multiple subscribes
+    def on_any(_client, _userdata, msg):
+        topic = msg.topic or ""
+        try:
+            data = json.loads(msg.payload.decode("utf-8"))
+        except Exception:
+            return
+
+        if topic.endswith("/telemetry"):
+            node_id = str(data.get("node_id", "unknown"))
+            if data.get("timestamp"):
+                BUFFER[node_id].append(data)
+                KNOWN_NODES.add(node_id)
+        elif topic.endswith("/anomaly"):
+            node_id = str(data.get("node_id", "unknown"))
+            ANOMALIES[node_id].append(data)
+
+    # Attach handler once, then subscribe to topics
+    mqc.client.on_message = on_any
+    mqc.client.subscribe("derms/+/telemetry")
+    mqc.client.subscribe("derms/+/anomaly")
+    print(f"[viz] Subscribed to MQTT at {MQTT_HOST} (derms/+/telemetry, derms/+/anomaly)")
+
+
+# Start MQTT listener in this (serving) process
+threading.Thread(target=_start_mqtt, daemon=True).start()
+
+# ------------------------------------------------------------------------------
 # Dash app
+# ------------------------------------------------------------------------------
 app = dash.Dash(__name__)
-app.title = "DERMS Live Visualizer"
+server = app.server
+app.title = "DERMS Live Dashboard"
 
-# build simple node cards (icon + text)
-def node_card(node):
-    return html.Div(
-        id=f"card-{node.name}",
-        children=[
-            html.Div(node.name, style={"fontWeight":"bold"}),
-            html.Div(id=f"val-{node.name}", children="P: -- kW | V: -- pu", style={"fontSize":"14px"})
-        ],
-        style={
-            "border":"1px solid #ddd", "borderRadius":"6px", "padding":"8px",
-            "width":"220px", "textAlign":"center", "background":"#fff"
-        }
+app.layout = html.Div(
+    style={"fontFamily": "Inter, system-ui, sans-serif", "padding": "16px", "maxWidth": "1200px", "margin": "0 auto"},
+    children=[
+        html.H2("DERMS Live Dashboard (MQTT)"),
+        html.P(
+            id="mqtt-status",
+            style={
+                "padding": "10px",
+                "borderRadius": "8px",
+                "backgroundColor": "#f3f4f6",
+                "border": "1px solid #e5e7eb",
+                "fontSize": "14px",
+                "marginBottom": "12px",
+            },
+        ),
+
+        html.Div(
+            style={"display": "flex", "gap": "12px", "alignItems": "center", "flexWrap": "wrap"},
+            children=[
+                html.Label("Node:", style={"fontWeight": 600}),
+                dcc.Dropdown(
+                    id="node-select",
+                    options=[],
+                    value=None,
+                    placeholder="Waiting for data…",
+                    style={"minWidth": "240px"},
+                    clearable=False,
+                ),
+                html.Div(id="anomaly-banner", style={"fontWeight": 600}),
+            ],
+        ),
+
+        html.Div(style={"height": "12px"}),
+
+        dcc.Graph(id="power-graph", figure=go.Figure(), config={"displayModeBar": False}),
+        dcc.Graph(id="voltage-graph", figure=go.Figure(), config={"displayModeBar": False}),
+        dcc.Graph(id="frequency-graph", figure=go.Figure(), config={"displayModeBar": False}),
+
+        # UI refresh cadence (ms)
+        dcc.Interval(id="tick", interval=1000, n_intervals=0),
+    ],
+)
+
+# ------------------------------------------------------------------------------
+# Helpers
+# ------------------------------------------------------------------------------
+
+def _parse_ts(ts: str):
+    """Parse ISO8601 timestamps (Z or offset) → datetime; return None if invalid."""
+    try:
+        return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except Exception:
+        return None
+
+
+def _get_series_for_node(node_id: str, max_points: int = PLOT_POINTS) -> Tuple[List[datetime], List[float], List[float], List[float]]:
+    """Extract recent time series for a node from BUFFER, using real datetime for clean ticks."""
+    if not node_id or node_id not in BUFFER or len(BUFFER[node_id]) == 0:
+        return [], [], [], []
+
+    # Take the last N items and parse timestamps to datetime
+    items = list(BUFFER[node_id])[-max_points:]
+    parsed = []
+    for d in items:
+        t = _parse_ts(d.get("timestamp", ""))
+        if t is not None:
+            parsed.append((t, d))
+
+    if not parsed:
+        return [], [], [], []
+
+    times = [t for (t, _) in parsed]
+    p_kw  = [float(x.get("power_kw", 0.0)) for _, x in parsed]
+    v     = [float(x.get("voltage", 0.0))   for _, x in parsed]
+    f_hz  = [float(x.get("frequency_hz", 0.0)) for _, x in parsed]
+    return times, p_kw, v, f_hz
+
+#STILL BEING DEVELOPED!!!!
+def _recent_anomaly_label(node_id: str):
+    """Return a small banner message if any anomalies recently flagged."""
+    if node_id in ANOMALIES and len(ANOMALIES[node_id]) > 0:
+        recent = list(ANOMALIES[node_id])[-50:]
+        if any(bool(a.get("anomaly")) for a in recent):
+            return ("Anomaly detected (z-score) in recent samples", "#fee2e2", "#991b1b")  # red
+    return ("No recent anomalies", "#ecfdf5", "#065f46")  # green
+
+
+def _line_figure(title: str, x, y, y_title: str):
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=x, y=y, mode="lines"))
+    fig.update_layout(
+        title=title,
+        margin=dict(l=40, r=10, t=40, b=40),
+        height=300,
+        xaxis=dict(
+            tickformat="%H:%M:%S",   # timestamp format (HH:MM:SS) labels
+            tickmode="auto",
+            nticks=8,                # limit tick count
+            showgrid=True,
+        ),
+        yaxis_title=y_title,
+        template="plotly_white",
+        hovermode="x unified",
+    )
+    return fig
+
+# ------------------------------------------------------------------------------
+# Callbacks
+# ------------------------------------------------------------------------------
+@app.callback(
+    Output("mqtt-status", "children"),
+    Output("node-select", "options"),
+    Output("node-select", "value"),
+    Output("anomaly-banner", "children"),
+    Output("anomaly-banner", "style"),
+    Output("power-graph", "figure"),
+    Output("voltage-graph", "figure"),
+    Output("frequency-graph", "figure"),
+    Input("tick", "n_intervals"),
+    State("node-select", "value"),
+)
+def update_ui(_n, selected_node):
+    # 1) MQTT status text
+    mqtt_ok = MQTTClient is not None
+    have_data = len(KNOWN_NODES) > 0
+    status = (
+        f"MQTT host: {MQTT_HOST}  •  Client: {'OK' if mqtt_ok else 'Unavailable'}  •  "
+        f"Nodes observed: {', '.join(sorted(KNOWN_NODES)) if have_data else '...waiting...'}"
     )
 
-app.layout = html.Div([
-    html.H2("DERMS Live Visualizer", style={"color":"#1B3A5F"}),
-    html.Div([
-        # left: node cards
-        html.Div([node_card(n) for n in NODES], style={"display":"flex","gap":"12px","flexWrap":"wrap"}),
-        # right: controls + chart
-        html.Div([
-            html.Label("Select node:"),
-            dcc.Dropdown(id="node-select", options=[{"label":n.name,"value":n.name} for n in NODES], value=NODES[0].name),
-            dcc.Graph(id="live-chart", style={"height":"360px"}),
-            html.Div(id="alert-box", style={"marginTop":"8px","fontWeight":"bold"})
-        ], style={"width":"100%","marginTop":"12px"})
-    ], style={"display":"grid","gridTemplateColumns":"1fr","gap":"18px"}),
-    # interval updater
-    dcc.Interval(id="interval", interval=SAMPLE_INTERVAL_MS, n_intervals=0),
-    # hidden store for history if needed
-    dcc.Store(id="store-history")
-], style={"fontFamily":"Arial, Helvetica, sans-serif","padding":"18px", "background":"#F8F9FA"})
+    # 2) Node options & default selection
+    options = [{"label": nid, "value": nid} for nid in sorted(KNOWN_NODES)]
+    if selected_node is None and options:
+        selected_node = options[0]["value"]
 
-# Callback: update sim and UI each tick
-@app.callback(
-    Output("live-chart","figure"),
-    Output("alert-box","children"),
-    [Input("interval","n_intervals"), Input("node-select","value")]
-)
-def update_live(n_intervals, selected_node):
-    # advance simulation one step for all nodes
-    ts = pd.Timestamp.utcnow().isoformat()
-    for n in NODES:
-        n.step(dt=1)
-    log.add_row(ts)
+    # 3) Series for graphs
+    if selected_node and selected_node in BUFFER:
+        times, p_kw, v, f_hz = _get_series_for_node(selected_node, max_points=PLOT_POINTS)
+        power_fig = _line_figure("Power (kW)", times, p_kw, "kW")
+        volt_fig  = _line_figure("Voltage (V)", times, v, "V")
+        freq_fig  = _line_figure("Frequency (Hz)", times, f_hz, "Hz")
 
-    # record history
-    time_history.append(ts)
-    for n in NODES:
-        history[n.name].append(n.base_p_kw)
+        # 4) Anomaly banner
+        msg, bg, fg = _recent_anomaly_label(selected_node)
+        banner_style = {
+            "padding": "6px 10px",
+            "borderRadius": "8px",
+            "backgroundColor": bg,
+            "color": fg,
+        }
+        return status, options, selected_node, msg, banner_style, power_fig, volt_fig, freq_fig
 
-    # build line chart for selected node
-    y = list(history[selected_node])
-    x = list(time_history)
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=x, y=y, mode="lines+markers", name=f"{selected_node} P (kW)",
-                             line=dict(color="#4A90E2")))
-    fig.update_layout(margin=dict(l=40,r=20,t=30,b=40), xaxis_title="Time", yaxis_title="Active Power (kW)",
-                      template="simple_white")
+    # No data yet → placeholders
+    placeholder = go.Figure()
+    placeholder.update_layout(template="plotly_white", height=300)
+    banner_style = {
+        "padding": "6px 10px",
+        "borderRadius": "8px",
+        "backgroundColor": "#fef3c7",
+        "color": "#92400e",
+    }
+    return (
+        status,
+        options,
+        selected_node,
+        "Waiting for data… start the replayer to see live updates.",
+        banner_style,
+        placeholder,
+        placeholder,
+        placeholder,
+    )
 
-    # build alert summary (simple rule: power below zero or big jump)
-    alerts = []
-    for n in NODES:
-        val = n.base_p_kw
-        # example alert rule: abnormal negative power or > 2x base
-        if val < -1.0 or val > (n.base_p_kw*3 + 2):  # this is illustrative
-            alerts.append(f"ALERT {n.name}: unusual power {val:.2f} kW")
-    alert_text = "; ".join(alerts) if alerts else "All nodes nominal."
-
-    # update node cards via client-side? Simple approach: update via dcc.Graph hover (we will just return chart + alert)
-    return fig, alert_text
-
+# ------------------------------------------------------------------------------
+# Entrypoint
+# ------------------------------------------------------------------------------
 if __name__ == "__main__":
-    app.run(debug=True, port=8050)  # Dash 2.16+ API
+    # Disable reloader so the MQTT thread runs in the serving process
+    app.run(host="127.0.0.1", port=8050, debug=True, use_reloader=False)
