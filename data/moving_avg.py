@@ -1,4 +1,4 @@
-
+import numpy as np
 
 class Node_MA:
     def __init__(self,n):
