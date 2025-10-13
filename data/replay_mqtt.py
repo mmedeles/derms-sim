@@ -21,7 +21,7 @@ import time
 from pathlib import Path
 
 import pandas as pd
-
+from moving_avg import Node_MA
 from comm.mqtt_client import MQTTClient
 
 
@@ -50,7 +50,7 @@ def validate_columns(df: pd.DataFrame):
         )
 
 
-def publish_dataframe(df: pd.DataFrame, mqc: MQTTClient, topic_prefix: str, rate: float, limit: int | None):
+def publish_dataframe(df: pd.DataFrame, mqc: MQTTClient, topic_prefix: str, rate: float, limit: int | None, ma: Node_MA):
     sleep = 1.0 / max(rate, 0.001)
     sent = 0
     printed = 0
@@ -63,7 +63,8 @@ def publish_dataframe(df: pd.DataFrame, mqc: MQTTClient, topic_prefix: str, rate
 
         # Build clean payload
         payload = {k: v for k, v in row.dropna().to_dict().items()}
-
+        payload["moving_avg_value"] = ma(row['Hz'])
+        
         # Debug: show first few
         if printed < 5:
             print(f"[replay] host={mqc.client._host} topic={topic} payload={json.dumps(payload)[:200]}")
@@ -87,7 +88,8 @@ def publish_dataframe(df: pd.DataFrame, mqc: MQTTClient, topic_prefix: str, rate
 def one_pass(csv_path: Path, chunksize: int, mqc: MQTTClient, topic_prefix: str, rate: float, limit: int | None):
     """Stream the CSV once, chunk by chunk."""
     total = 0
-    for chunk in pd.read_csv(csv_path, chunksize=chunksize):
+    ma=Node_MA(60)
+    for chunk in pd.read_csv(csv_path, chunksize=chunksize, ma):
         validate_columns(chunk)
         total += publish_dataframe(chunk, mqc, topic_prefix, rate, limit=None if limit is None else max(0, limit - total))
         if limit is not None and total >= limit:
@@ -114,7 +116,7 @@ def main():
     )
 
     mqc = MQTTClient(client_id="replayer", host=args.host, port=args.port)
-
+    
     try:
         if args.loop:
             # Loop forever over the CSV
