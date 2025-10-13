@@ -63,7 +63,7 @@ def publish_dataframe(df: pd.DataFrame, mqc: MQTTClient, topic_prefix: str, rate
 
         # Build clean payload
         payload = {k: v for k, v in row.dropna().to_dict().items()}
-        payload["moving_avg_value"] = ma(row['Hz'])
+        payload["moving_avg_value"] = ma.update(row['Hz'])
         
         # Debug: show first few
         if printed < 5:
