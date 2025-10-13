@@ -50,7 +50,7 @@ def validate_columns(df: pd.DataFrame):
         )
 
 
-def publish_dataframe(df: pd.DataFrame, mqc: MQTTClient, topic_prefix: str, rate: float, limit: int | None, ma: Node_MA):
+def publish_dataframe(df: pd.DataFrame, mqc: MQTTClient, topic_prefix: str, rate: float, limit: int | None, m_avgs):
     sleep = 1.0 / max(rate, 0.001)
     sent = 0
     printed = 0
@@ -63,7 +63,7 @@ def publish_dataframe(df: pd.DataFrame, mqc: MQTTClient, topic_prefix: str, rate
 
         # Build clean payload
         payload = {k: v for k, v in row.dropna().to_dict().items()}
-        payload["moving_avg_value"] = ma.update(row['Hz'])
+        payload["moving_avg_value"] = m_avgs["Hz1"].update(row['Hz']) #ma.update(row['Hz'])
         
         # Debug: show first few
         if printed < 5:
@@ -88,8 +88,9 @@ def publish_dataframe(df: pd.DataFrame, mqc: MQTTClient, topic_prefix: str, rate
 def one_pass(csv_path: Path, chunksize: int, mqc: MQTTClient, topic_prefix: str, rate: float, limit: int | None):
     """Stream the CSV once, chunk by chunk."""
     total = 0
-    ma=Node_MA(60)
-    for chunk in pd.read_csv(csv_path, chunksize=chunksize, ma):
+    #ma=Node_MA(60)
+    m_avgs={"Hz1":Node_MA(60),"Hz2":Node_MA(60),"Hz3":Node_MA(60)}
+    for chunk in pd.read_csv(csv_path, chunksize=chunksize, m_avgs):
         validate_columns(chunk)
         total += publish_dataframe(chunk, mqc, topic_prefix, rate, limit=None if limit is None else max(0, limit - total))
         if limit is not None and total >= limit:
