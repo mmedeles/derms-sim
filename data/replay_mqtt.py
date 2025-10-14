@@ -1,17 +1,18 @@
 """
-Replay normalized CSV rows to MQTT topics at a fixed rate.
+Replay normalized CSV rows to MQTT topics at a fixed rate,
+with enriching each row with moving average & moving std.
 
-Input CSV schema (normalized):
+Expected input CSV columns (normalized):
   timestamp,node_id,type,power_kw,voltage,frequency_hz
 
-Publishes (JSON):
-  topic: {topic_prefix}/{node_id}/telemetry
-  payload: row values as dict (non-null)
+Publishes JSON to:
+  {topic_prefix}/{node_id}/telemetry
 
 Examples:
-  python -m data.replay_mqtt --csv data/normalized.csv --rate 10 --host localhost
-  python -m data.replay_mqtt --csv data/normalized.csv --rate 200 --limit 2000 --host localhost
-  python -m data.replay_mqtt --csv data/normalized.csv --rate 20 --host localhost --loop
+  # continuous replay + MA & STD on frequency_hz
+  python -m data.replay_mqtt --csv data/normalized.csv --host localhost --rate 20 --loop \
+      --ma-window 240 --ma-signal frequency_hz \
+      --ma-field moving_avg_frequency_hz --std-field moving_std_frequency_hz
 """
 
 from __future__ import annotations
@@ -19,55 +20,78 @@ import argparse
 import json
 import time
 from pathlib import Path
+from typing import Optional
 
 import pandas as pd
-from moving_avg import Node_MA
-from comm.mqtt_client import MQTTClient
 
+from comm.mqtt_client import MQTTClient
+from .moving_avg import Node_MA
+
+# ---------------------------------------------------------------------------
 
 def parse_args():
     ap = argparse.ArgumentParser(description="Replay normalized CSV to MQTT.")
     ap.add_argument("--csv", default="data/normalized.csv", help="Path to normalized CSV")
     ap.add_argument("--host", default="localhost", help="MQTT broker host")
     ap.add_argument("--port", type=int, default=1883, help="MQTT broker port")
-    ap.add_argument("--topic-prefix", dest="topic_prefix", default="derms", help="Topic prefix (default: derms)")
+    ap.add_argument("--topic-prefix", dest="topic_prefix", default="derms", help="Topic prefix")
     ap.add_argument("--rate", type=float, default=10.0, help="Messages per second")
-    ap.add_argument("--limit", type=int, default=None, help="Optional max rows to send (then exit)")
+    ap.add_argument("--limit", type=int, default=None, help="Max rows to send then exit")
     ap.add_argument("--chunksize", type=int, default=10_000, help="CSV read chunk size")
     ap.add_argument("--loop", action="store_true", help="Loop over the CSV forever")
-    return ap.parse_args()
 
+    # Moving statistics
+    ap.add_argument("--ma-window", type=int, default=None, help="Enable moving stats with this window size")
+    ap.add_argument("--ma-signal", default="frequency_hz", help="Column to smooth (e.g., frequency_hz or power_kw)")
+    ap.add_argument("--ma-field", default=None, help="Output field for moving average (default: moving_avg_<signal>)")
+    ap.add_argument("--std-field", default=None, help="Output field for moving std (default: moving_std_<signal>)")
+    ap.add_argument("--std-ddof", type=int, default=1, help="ddof for sample std (default 1)")
+    return ap.parse_args()
 
 REQUIRED_COLS = ["timestamp", "node_id", "power_kw"]
 
-
-def validate_columns(df: pd.DataFrame):
+def _validate_columns(df: pd.DataFrame, need_ma: bool, ma_signal: str):
     missing = [c for c in REQUIRED_COLS if c not in df.columns]
     if missing:
-        raise ValueError(
-            f"[replay] CSV is missing required columns: {missing}. "
-            "Expected at least: timestamp,node_id,power_kw (plus optional voltage,frequency_hz)."
-        )
+        raise ValueError(f"[replay] CSV missing required columns: {missing}")
+    if need_ma and ma_signal not in df.columns:
+        raise ValueError(f"[replay] --ma-signal '{ma_signal}' not found in CSV columns.")
 
+# ---------------------------------------------------------------------------
 
-def publish_dataframe(df: pd.DataFrame, mqc: MQTTClient, topic_prefix: str, rate: float, limit: int | None, m_avgs):
+def _publish_dataframe(
+    df: pd.DataFrame,
+    mqc: MQTTClient,
+    topic_prefix: str,
+    rate: float,
+    limit: Optional[int],
+    ma: Optional[Node_MA],
+    ma_signal: str,
+    ma_field: str,
+    std_field: str,
+):
     sleep = 1.0 / max(rate, 0.001)
     sent = 0
     printed = 0
-
-    validate_columns(df)
 
     for _, row in df.iterrows():
         node = str(row["node_id"])
         topic = f"{topic_prefix}/{node}/telemetry"
 
-        # Build clean payload
         payload = {k: v for k, v in row.dropna().to_dict().items()}
-        payload["moving_avg_value"] = m_avgs["Hz1"].update(row['Hz']) #ma.update(row['Hz'])
-        payload['moving_std'] = m_avgs['Hz1'].std()
-        # Debug: show first few
+
+        # add moving stats if enabled
+        if ma is not None:
+            avg = ma.update(row.get(ma_signal))
+            std = ma.std()
+            payload[ma_field] = float(avg)
+            payload[std_field] = float(std)
+
         if printed < 5:
-            print(f"[replay] host={mqc.client._host} topic={topic} payload={json.dumps(payload)[:200]}")
+            preview = json.dumps(payload, default=str)
+            if len(preview) > 240:
+                preview = preview[:240] + "...}"
+            print(f"[replay] host={mqc.client._host} topic={topic} payload={preview}")
             printed += 1
 
         mqc.publish(topic, payload)
@@ -84,26 +108,48 @@ def publish_dataframe(df: pd.DataFrame, mqc: MQTTClient, topic_prefix: str, rate
 
     return sent
 
-
-def one_pass(csv_path: Path, chunksize: int, mqc: MQTTClient, topic_prefix: str, rate: float, limit: int | None):
-    """Stream the CSV once, chunk by chunk."""
+def _one_pass(
+    csv_path: Path,
+    chunksize: int,
+    mqc: MQTTClient,
+    topic_prefix: str,
+    rate: float,
+    limit: Optional[int],
+    ma: Optional[Node_MA],
+    ma_signal: str,
+    ma_field: str,
+    std_field: str,
+):
     total = 0
-    #ma=Node_MA(60)
-    m_avgs={"Hz1":Node_MA(60),"Hz2":Node_MA(60),"Hz3":Node_MA(60)}
-    for chunk in pd.read_csv(csv_path, chunksize=chunksize, m_avgs):
-        validate_columns(chunk)
-        total += publish_dataframe(chunk, mqc, topic_prefix, rate, limit=None if limit is None else max(0, limit - total))
+    for chunk in pd.read_csv(csv_path, chunksize=chunksize):
+        _validate_columns(chunk, need_ma=ma is not None, ma_signal=ma_signal)
+        total += _publish_dataframe(
+            chunk,
+            mqc,
+            topic_prefix,
+            rate,
+            None if limit is None else max(0, limit - total),
+            ma,
+            ma_signal,
+            ma_field,
+            std_field,
+        )
         if limit is not None and total >= limit:
             break
     return total
 
+# ---------------------------------------------------------------------------
 
 def main():
     args = parse_args()
     csv_path = Path(args.csv)
-
     if not csv_path.exists():
         raise FileNotFoundError(f"[replay] CSV not found: {csv_path.resolve()}")
+
+    use_ma = args.ma_window is not None and args.ma_window > 0
+    ma = Node_MA(n=args.ma_window, ddof=args.std_ddof) if use_ma else None
+    ma_field = args.ma_field or (f"moving_avg_{args.ma_signal}" if use_ma else "")
+    std_field = args.std_field or (f"moving_std_{args.ma_signal}" if use_ma else "")
 
     print(
         f"[replay] starting\n"
@@ -114,30 +160,30 @@ def main():
         f"  limit        = {args.limit}\n"
         f"  chunksize    = {args.chunksize}\n"
         f"  loop         = {args.loop}\n"
+        f"  moving_stats = {'ON' if use_ma else 'OFF'}"
+        f"{'' if not use_ma else f' (signal={args.ma_signal}, window={args.ma_window}, avg_field={ma_field}, std_field={std_field})'}\n"
     )
 
     mqc = MQTTClient(client_id="replayer", host=args.host, port=args.port)
-    
+
     try:
         if args.loop:
-            # Loop forever over the CSV
-            #TODO: Find A Way to indicate the end of the CSV when loop cycles through the data in full
-            #end of csv/data must be seen on the dash, broker, and replayer
-
-            loop_count = 0
+            pass_idx = 0
             while True:
-                loop_count += 1
-                print(f"[replay] pass #{loop_count}")
-                sent = one_pass(csv_path, args.chunksize, mqc, args.topic_prefix, args.rate, args.limit)
+                pass_idx += 1
+                print(f"[replay] pass #{pass_idx}")
+                _one_pass(
+                    csv_path, args.chunksize, mqc, args.topic_prefix, args.rate,
+                    args.limit, ma, args.ma_signal, ma_field, std_field
+                )
                 if args.limit is not None:
-                    # With a limit, one pass will always exit early → stop
                     break
-                # Small pause between loops (so the UI clearly shows wrap-around)
-                time.sleep(1.0)
+                time.sleep(0.5)
         else:
-            # Single pass
-            one_pass(csv_path, args.chunksize, mqc, args.topic_prefix, args.rate, args.limit)
-
+            _one_pass(
+                csv_path, args.chunksize, mqc, args.topic_prefix, args.rate,
+                args.limit, ma, args.ma_signal, ma_field, std_field
+            )
     except KeyboardInterrupt:
         print("\n[replay] interrupted by user")
     except Exception as e:
@@ -145,7 +191,6 @@ def main():
         raise
     finally:
         print("[replay] done.")
-
 
 if __name__ == "__main__":
     main()
