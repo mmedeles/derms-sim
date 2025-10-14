@@ -64,7 +64,7 @@ def publish_dataframe(df: pd.DataFrame, mqc: MQTTClient, topic_prefix: str, rate
         # Build clean payload
         payload = {k: v for k, v in row.dropna().to_dict().items()}
         payload["moving_avg_value"] = m_avgs["Hz1"].update(row['Hz']) #ma.update(row['Hz'])
-        
+        payload['moving_std'] = m_avgs['Hz1'].std()
         # Debug: show first few
         if printed < 5:
             print(f"[replay] host={mqc.client._host} topic={topic} payload={json.dumps(payload)[:200]}")
