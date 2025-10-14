@@ -1,18 +1,19 @@
 """
 Dash visualization that CONSUMES live telemetry over MQTT.
 
-- Subscribes to:
-    derms/+/telemetry   (canonical schema: timestamp,node_id,type,power_kw,voltage,frequency_hz)
-    derms/+/anomaly     (optional)
+Subscribes to:
+  - derms/+/telemetry   (timestamp,node_id,type,power_kw,voltage,frequency_hz[, moving_avg_*])
+  - derms/+/anomaly     (optional anomaly messages)
 
-- Shows:
-    * Node selector (auto-discovers node_ids)
-    * Live graphs: Power (kW), Voltage (V), Frequency (Hz)
-    * Simple anomaly banner
+Shows:
+  - Node selector (auto-discovers node_ids)
+  - Live graphs: Power (kW), Voltage (V), Frequency (Hz)
+  - Frequency plot overlays a dotted Moving Average (if present in messages)
+  - Simple anomaly banner
 
 Run:
-    python -m viz.app
-    # open http://127.0.0.1:8050
+  python -m viz.app
+  # open http://127.0.0.1:8050
 """
 
 from __future__ import annotations
@@ -28,17 +29,22 @@ from dash import dcc, html, Input, Output, State
 import plotly.graph_objs as go
 
 # ------------------------------------------------------------------------------
-# MQTT consumer setup
+# Config
 # ------------------------------------------------------------------------------
 try:
     from comm.mqtt_client import MQTTClient
 except Exception:
-    MQTTClient = None  # UI will still load; we'll show status = Unavailable.
+    MQTTClient = None  # UI will still load; status will say Unavailable.
 
 MQTT_HOST = os.getenv("MQTT_HOST", "localhost")
+
 # how many points to keep per node in memory and to plot
 HISTORY_POINTS = int(os.getenv("HISTORY_POINTS", "1200"))
 PLOT_POINTS = int(os.getenv("PLOT_POINTS", "300"))  # show last N on each refresh
+
+# The field name used for moving average overlay (published by replayer)
+# default matches: --ma-field moving_avg_frequency_hz
+MA_FIELD = os.getenv("MA_FIELD", "moving_avg_frequency_hz")
 
 # Global buffers (in-memory, process-local)
 BUFFER = defaultdict(lambda: deque(maxlen=HISTORY_POINTS))     # node_id -> deque of telemetry dicts
@@ -46,6 +52,9 @@ ANOMALIES = defaultdict(lambda: deque(maxlen=HISTORY_POINTS))  # node_id -> dequ
 KNOWN_NODES = set()
 
 
+# ------------------------------------------------------------------------------
+# MQTT subscriber (single on_message handler)
+# ------------------------------------------------------------------------------
 def _start_mqtt():
     """Background MQTT subscriber thread that fills BUFFER and ANOMALIES."""
     if MQTTClient is None:
@@ -54,7 +63,6 @@ def _start_mqtt():
 
     mqc = MQTTClient(client_id="viz_ui", host=MQTT_HOST)
 
-    # ONE global handler to avoid overwriting on_message with multiple subscribes
     def on_any(_client, _userdata, msg):
         topic = msg.topic or ""
         try:
@@ -71,7 +79,7 @@ def _start_mqtt():
             node_id = str(data.get("node_id", "unknown"))
             ANOMALIES[node_id].append(data)
 
-    # Attach handler once, then subscribe to topics
+    # Attach one handler, subscribe to both patterns
     mqc.client.on_message = on_any
     mqc.client.subscribe("derms/+/telemetry")
     mqc.client.subscribe("derms/+/anomaly")
@@ -80,6 +88,7 @@ def _start_mqtt():
 
 # Start MQTT listener in this (serving) process
 threading.Thread(target=_start_mqtt, daemon=True).start()
+
 
 # ------------------------------------------------------------------------------
 # Dash app
@@ -143,12 +152,13 @@ def _parse_ts(ts: str):
         return None
 
 
-def _get_series_for_node(node_id: str, max_points: int = PLOT_POINTS) -> Tuple[List[datetime], List[float], List[float], List[float]]:
-    """Extract recent time series for a node from BUFFER, using real datetime for clean ticks."""
+def _get_series_for_node(node_id: str, max_points: int = PLOT_POINTS):
+    """Extract recent time series for a node from BUFFER using real datetime.
+    Returns: times, power_kW, voltage_V, frequency_Hz, moving_avg (or list of None)
+    """
     if not node_id or node_id not in BUFFER or len(BUFFER[node_id]) == 0:
-        return [], [], [], []
+        return [], [], [], [], []
 
-    # Take the last N items and parse timestamps to datetime
     items = list(BUFFER[node_id])[-max_points:]
     parsed = []
     for d in items:
@@ -157,33 +167,42 @@ def _get_series_for_node(node_id: str, max_points: int = PLOT_POINTS) -> Tuple[L
             parsed.append((t, d))
 
     if not parsed:
-        return [], [], [], []
+        return [], [], [], [], []
 
     times = [t for (t, _) in parsed]
     p_kw  = [float(x.get("power_kw", 0.0)) for _, x in parsed]
     v     = [float(x.get("voltage", 0.0))   for _, x in parsed]
     f_hz  = [float(x.get("frequency_hz", 0.0)) for _, x in parsed]
-    return times, p_kw, v, f_hz
 
-#STILL BEING DEVELOPED!!!!
+    # moving average
+    ma_vals = []
+    for _, x in parsed:
+        val = x.get(MA_FIELD)
+        try:
+            ma_vals.append(float(val) if val is not None else None)
+        except Exception:
+            ma_vals.append(None)
+
+    return times, p_kw, v, f_hz, ma_vals
+
 def _recent_anomaly_label(node_id: str):
     """Return a small banner message if any anomalies recently flagged."""
     if node_id in ANOMALIES and len(ANOMALIES[node_id]) > 0:
         recent = list(ANOMALIES[node_id])[-50:]
         if any(bool(a.get("anomaly")) for a in recent):
-            return ("Anomaly detected (z-score) in recent samples", "#fee2e2", "#991b1b")  # red
+            return ("Anomaly detected in recent samples", "#fee2e2", "#991b1b")  # red
     return ("No recent anomalies", "#ecfdf5", "#065f46")  # green
 
 
 def _line_figure(title: str, x, y, y_title: str):
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=x, y=y, mode="lines"))
+    fig.add_trace(go.Scatter(x=x, y=y, mode="lines", name=title))
     fig.update_layout(
         title=title,
         margin=dict(l=40, r=10, t=40, b=40),
         height=300,
         xaxis=dict(
-            tickformat="%H:%M:%S",   # timestamp format (HH:MM:SS) labels
+            tickformat="%H:%M:%S",   # pretty HH:MM:SS labels
             tickmode="auto",
             nticks=8,                # limit tick count
             showgrid=True,
@@ -191,6 +210,7 @@ def _line_figure(title: str, x, y, y_title: str):
         yaxis_title=y_title,
         template="plotly_white",
         hovermode="x unified",
+        legend=dict(orientation="h", yanchor="bottom", y=-.25, xanchor="left", x=0),
     )
     return fig
 
@@ -215,7 +235,7 @@ def update_ui(_n, selected_node):
     have_data = len(KNOWN_NODES) > 0
     status = (
         f"MQTT host: {MQTT_HOST}  •  Client: {'OK' if mqtt_ok else 'Unavailable'}  •  "
-        f"Nodes observed: {', '.join(sorted(KNOWN_NODES)) if have_data else '...waiting...'}"
+        f"Nodes observed: {', '.join(sorted(KNOWN_NODES)) if have_data else '— waiting —'}"
     )
 
     # 2) Node options & default selection
@@ -225,10 +245,22 @@ def update_ui(_n, selected_node):
 
     # 3) Series for graphs
     if selected_node and selected_node in BUFFER:
-        times, p_kw, v, f_hz = _get_series_for_node(selected_node, max_points=PLOT_POINTS)
+        times, p_kw, v, f_hz, ma_vals = _get_series_for_node(selected_node, max_points=PLOT_POINTS)
         power_fig = _line_figure("Power (kW)", times, p_kw, "kW")
         volt_fig  = _line_figure("Voltage (V)", times, v, "V")
         freq_fig  = _line_figure("Frequency (Hz)", times, f_hz, "Hz")
+
+        # Add moving-average overlay on Frequency (dotted line) if present
+        if any(val is not None for val in ma_vals):
+            freq_fig.add_trace(
+                go.Scatter(
+                    x=times,
+                    y=ma_vals,
+                    mode="lines",
+                    name="Moving Avg",
+                    line=dict(dash="dot")
+                )
+            )
 
         # 4) Anomaly banner
         msg, bg, fg = _recent_anomaly_label(selected_node)
