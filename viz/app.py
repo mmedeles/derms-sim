@@ -177,6 +177,7 @@ def _line_figure(title: str, x, y, y_title: str):
         template="plotly_white",
         hovermode="x unified",
         legend=dict(orientation="h", yanchor="bottom", y=1.05, xanchor="center", x=0.5),
+        uirevision="keep"
     )
     return fig
 
