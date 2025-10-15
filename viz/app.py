@@ -139,15 +139,19 @@ def _get_series_for_node(node_id: str, max_points: int = PLOT_POINTS):
     v     = [float(x.get("voltage", 0.0))   for _, x in parsed]
     f_hz  = [float(x.get("frequency_hz", 0.0)) for _, x in parsed]
 
-    ma_vals, std_vals = [], []
+    ma_vals, std_vals, adjusted_vals = [], [], []
     for _, x in parsed:
         # moving average
         mv = x.get(MA_FIELD)
+        adjusted = x.get("Hz_adjusted")
         try:
             mv = float(mv) if mv is not None else None
+            adjusted = float(adjusted) if adjusted is not None else None
         except Exception:
             mv = None
+            adjusted = None
         ma_vals.append(mv)
+        adjusted_vals.append(adjusted)
         # moving std
         sv = x.get(STD_FIELD)
         try:
@@ -156,7 +160,7 @@ def _get_series_for_node(node_id: str, max_points: int = PLOT_POINTS):
             sv = None
         std_vals.append(sv)
 
-    return times, p_kw, v, f_hz, ma_vals, std_vals
+    return times, p_kw, v, f_hz, ma_vals, std_vals, adjusted_vals
 
 def _recent_anomaly_label(node_id: str):
     if node_id in ANOMALIES and len(ANOMALIES[node_id]) > 0:
@@ -177,6 +181,7 @@ def _line_figure(title: str, x, y, y_title: str):
         template="plotly_white",
         hovermode="x unified",
         legend=dict(orientation="h", yanchor="bottom", y=1.05, xanchor="center", x=0.5),
+        uirevision="keep"
     )
     return fig
 
@@ -205,7 +210,7 @@ def update_ui(_n, selected_node):
         selected_node = options[0]["value"]
 
     if selected_node and selected_node in BUFFER:
-        times, p_kw, v, f_hz, ma_vals, std_vals = _get_series_for_node(selected_node, max_points=PLOT_POINTS)
+        times, p_kw, v, f_hz, ma_vals, std_vals, adjusted_vals = _get_series_for_node(selected_node, max_points=PLOT_POINTS)
         power_fig = _line_figure("Power (kW)", times, p_kw, "kW")
         volt_fig  = _line_figure("Voltage (V)", times, v, "V")
         freq_fig  = _line_figure("Frequency (Hz)", times, f_hz, "Hz")
@@ -213,6 +218,8 @@ def update_ui(_n, selected_node):
         # Add Moving Avg (dotted) if present
         if any(val is not None for val in ma_vals):
             freq_fig.add_trace(go.Scatter(x=times, y=ma_vals, mode="lines", name="Moving Avg", line=dict(dash="dot")))
+        if any(val is not None for val in adjusted_vals):
+            freq_fig.add_trace(go.Scatter(x=times, y=adjusted_vals, mode="lines", name="Adjusted Values", line=dict(dash="dot")))
 
         # Add ±k*STD band around MA if both series present
         if STD_BAND_FACTOR > 0 and any(s is not None for s in std_vals) and any(m is not None for m in ma_vals):

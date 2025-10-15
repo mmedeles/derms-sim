@@ -26,7 +26,7 @@ import pandas as pd
 
 from comm.mqtt_client import MQTTClient
 from .moving_avg import Node_MA # relative import??????
-
+from .data_adjust import data_adjust
 # ---------------------------------------------------------------------------
 
 def parse_args():
@@ -69,6 +69,7 @@ def _publish_dataframe(
     ma_signal: str,
     ma_field: str,
     std_field: str,
+    adjuster
 ):
     sleep = 1.0 / max(rate, 0.001)
     sent = 0
@@ -79,14 +80,15 @@ def _publish_dataframe(
         topic = f"{topic_prefix}/{node}/telemetry"
 
         payload = {k: v for k, v in row.dropna().to_dict().items()}
-
+        payload["Hz_adjusted"] = row.get(ma_signal) + adjuster.adjust()
+        
         # add moving stats if enabled
         if ma is not None:
             avg = ma.update(row.get(ma_signal))
             std = ma.std()
             payload[ma_field] = float(avg)
             payload[std_field] = float(std)
-
+            
         if printed < 5:
             preview = json.dumps(payload, default=str)
             if len(preview) > 240:
@@ -120,6 +122,7 @@ def _one_pass(
     ma_field: str,
     std_field: str,
 ):
+    g = data_adjust(magnitude=0.01,method="gaussian",period=300) #magnitude-peak height,  method-shape of bump,  period-width   
     total = 0
     for chunk in pd.read_csv(csv_path, chunksize=chunksize):
         _validate_columns(chunk, need_ma=ma is not None, ma_signal=ma_signal)
@@ -133,6 +136,7 @@ def _one_pass(
             ma_signal,
             ma_field,
             std_field,
+            g
         )
         if limit is not None and total >= limit:
             break
