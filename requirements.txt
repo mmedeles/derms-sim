@@ -9,4 +9,4 @@ paho-mqtt       # MQTT client for Python
 PyYAML          # For configs/dataset_map.yml parsing
 python-dateutil # For timezone-aware timestamp parsing
 matplotlib~=3.10.6
-
+scikit-learn    # For Random Forest Model
