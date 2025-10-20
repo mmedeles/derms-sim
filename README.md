@@ -17,8 +17,12 @@ injection, anomaly detection, and evaluation next.
 ??
 
 ## TODO
+1. Build Anomaly Detection script
+2. Internal Manipulated Data
+3. ML Model(s)
+4. Find a way to display anomaly detection
 
-# DERMS Simulation Setup and execution
+# DERMS Simulation Setup and execution 
 
 This document describes how to fully run and demonstrate the DERMS Resilience Testbed simulation
 
