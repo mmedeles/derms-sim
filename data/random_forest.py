@@ -2,14 +2,14 @@
 Random Forest anomaly detector for frequency monitoring.
 
 This script trains a Random Forest classifier to detect anomalies
-in frequency data from DER nodes.
+in frequency data using moving average deviations.
 
 Usage:
-    # Train model on prepared data
-    python -m data.random_forest --train data/rf_training_data.csv --save models/rf_model.pkl
+    # Train model on mod.csv (pre-labeled with anomalies)
+    python -m data.random_forest --train data/mod.csv --save models/rf_model.pkl
     
     # Evaluate model
-    python -m data.random_forest --train data/rf_training_data.csv --evaluate
+    python -m data.random_forest --train data/mod.csv --evaluate
 """
 
 import argparse
@@ -21,18 +21,17 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import classification_report, confusion_matrix, accuracy_score
 
-# Feature columns used for training
+# Feature columns - deviations from moving averages
 FEATURE_COLS = [
-    'freq_deviation',
-    'freq_rolling_mean', 
-    'freq_rolling_std',
-    'freq_rate_change',
-    'freq_abs_rate_change'
+    'deviation_from_ma60',
+    'deviation_from_ma120',
+    'deviation_from_ma180',
+    'deviation_from_ma240'
 ]
 
 def parse_args():
     ap = argparse.ArgumentParser(description="Train Random Forest anomaly detector")
-    ap.add_argument("--train", required=True, help="Path to training data CSV")
+    ap.add_argument("--train", required=True, help="Path to training data CSV (mod.csv)")
     ap.add_argument("--save", default="models/rf_model.pkl", help="Path to save trained model")
     ap.add_argument("--evaluate", action="store_true", help="Print evaluation metrics")
     ap.add_argument("--test-size", type=float, default=0.2, help="Test set fraction")
@@ -40,17 +39,36 @@ def parse_args():
     ap.add_argument("--random-state", type=int, default=42, help="Random seed")
     return ap.parse_args()
 
-def load_training_data(csv_path: Path):
-    """Load and validate training data."""
+def load_and_prepare_data(csv_path: Path):
+    """Load mod.csv and engineer deviation features."""
     if not csv_path.exists():
         raise FileNotFoundError(f"Training data not found: {csv_path}")
     
+    print(f"[train] Loading {csv_path}...")
     df = pd.read_csv(csv_path)
     
     # Check for required columns
-    missing = [col for col in FEATURE_COLS + ['label'] if col not in df.columns]
+    required = ['Hz_adj', 'Hz_modified', 'ma60', 'ma120', 'ma180', 'ma240']
+    missing = [col for col in required if col not in df.columns]
     if missing:
-        raise ValueError(f"Training data missing required columns: {missing}")
+        raise ValueError(f"CSV missing required columns: {missing}")
+    
+    print(f"[train] Loaded {len(df)} rows")
+    
+    # Convert Hz_modified (TRUE/FALSE) to labels (1/0)
+    df['label'] = df['Hz_modified'].map({'TRUE': 1, True: 1, 'FALSE': 0, False: 0}).astype(int)
+    
+    # Engineer features: deviation from each moving average
+    df['deviation_from_ma60'] = df['Hz_adj'] - df['ma60']
+    df['deviation_from_ma120'] = df['Hz_adj'] - df['ma120']
+    df['deviation_from_ma180'] = df['Hz_adj'] - df['ma180']
+    df['deviation_from_ma240'] = df['Hz_adj'] - df['ma240']
+    
+    # Drop any NaN rows
+    df = df.dropna(subset=FEATURE_COLS + ['label'])
+    
+    print(f"[train] After cleaning: {len(df)} rows")
+    print(f"[train] Frequency range: {df['Hz_adj'].min():.4f} - {df['Hz_adj'].max():.4f} Hz")
     
     return df
 
@@ -64,6 +82,10 @@ def train_model(df: pd.DataFrame, n_estimators: int, test_size: float, random_st
     print(f"[train] Training data shape: {X.shape}")
     print(f"[train] Normal samples: {(y == 0).sum()}")
     print(f"[train] Anomaly samples: {(y == 1).sum()}")
+    
+    # Check if we have both classes
+    if len(np.unique(y)) < 2:
+        raise ValueError("Training data must contain both normal and anomaly samples")
     
     # Split into train/test
     X_train, X_test, y_train, y_test = train_test_split(
@@ -81,7 +103,7 @@ def train_model(df: pd.DataFrame, n_estimators: int, test_size: float, random_st
         max_depth=10,
         min_samples_split=10,
         min_samples_leaf=5,
-        n_jobs=-1 
+        n_jobs=-1
     )
     
     model.fit(X_train, y_train)
@@ -93,10 +115,8 @@ def train_model(df: pd.DataFrame, n_estimators: int, test_size: float, random_st
     return model, X_test, y_test, y_pred
 
 def evaluate_model(y_test, y_pred):
-    """Print evaluation metrics."""
-    print("\n" + "="*60)
+    # Evaluation metrics
     print("MODEL EVALUATION")
-    print("="*60)
     
     # Overall accuracy
     accuracy = accuracy_score(y_test, y_pred)
@@ -124,15 +144,12 @@ def evaluate_model(y_test, y_pred):
     recall = tp / (tp + fn) if (tp + fn) > 0 else 0
     f1 = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0
     
-    print("\n" + "="*60)
     print("KEY METRICS FOR ANOMALY DETECTION")
-    print("="*60)
     print(f"Precision (Anomaly): {precision:.4f} - When we predict anomaly, we're right {precision*100:.1f}% of time")
     print(f"Recall (Anomaly):    {recall:.4f} - We catch {recall*100:.1f}% of all anomalies")
     print(f"F1-Score (Anomaly):  {f1:.4f} - Overall anomaly detection performance")
     print(f"False Positives:     {fp} - Normal data incorrectly flagged as anomaly")
     print(f"False Negatives:     {fn} - Anomalies we missed")
-    print("="*60 + "\n")
 
 def save_model(model, save_path: Path):
     """Save trained model to disk."""
@@ -146,8 +163,8 @@ def save_model(model, save_path: Path):
 def main():
     args = parse_args()
     
-    print(f"[train] Loading training data from {args.train}...")
-    df = load_training_data(Path(args.train))
+    # Load and prepare data
+    df = load_and_prepare_data(Path(args.train))
     
     # Train model
     model, X_test, y_test, y_pred = train_model(
@@ -163,26 +180,21 @@ def main():
         'importance': model.feature_importances_
     }).sort_values('importance', ascending=False)
     
-    print("\nFeature Importance:")
+    print("\nFeature Importance (Deviation from Moving Averages):")
     for _, row in feature_importance.iterrows():
         print(f"  {row['feature']:25s}: {row['importance']:.4f}")
     
-    # Evaluate if requested
+    # Evaluate
     if args.evaluate:
         evaluate_model(y_test, y_pred)
     
     # Save model
     save_model(model, Path(args.save))
     
-    print("\n" + "="*60)
     print("TRAINING COMPLETE!")
-    print("="*60)
     print(f"Model saved to: {args.save}")
-    print(f"\nTo use this model for real-time detection:")
-    print(f"  1. Load model: model = pickle.load(open('{args.save}', 'rb'))")
-    print(f"  2. Prepare features from new frequency data")
-    print(f"  3. Predict: model.predict(features)")
-    print("="*60)
+    print(f"\nModel uses deviations from moving averages (ma60, ma120, ma180, ma240)")
+    print(f"to detect when frequency varies abnormally from expected values.")
 
 if __name__ == "__main__":
     main()
