@@ -5,7 +5,7 @@ class Node_MA:
     """
     Rolling window moving-average & moving-std tracker.
     """
-    def __init__(self, n: int = 60, ddof: int = 1):
+    def __init__(self, n: int = 240, ddof: int = 1):
         self.n = max(1, int(n))
         self.ddof = 0 if ddof is None else int(ddof)
         self.window: List[float] = []
@@ -22,13 +22,14 @@ class Node_MA:
             self.window.pop(0)
         return self.average()
 
-    def average(self) -> float:
-        return sum(self.window) / len(self.window) if self.window else 0.0
+    def average(self,n=60) -> float:
+        return sum(self.window[-n:]) / len(self.window[-n:]) if self.window else 0.0
 
-    def std(self) -> float:
-        n = len(self.window)
+    def std(self,n_=60) -> float:
+        window_slice=self.window[-n_:]
+        n = len(window_slice)
         if n <= self.ddof or n == 0:
             return 0.0
-        m = self.average()
-        var = sum((x - m) ** 2 for x in self.window) / (n - self.ddof)
+        m = sum(window_slice) / n
+        var = sum((x - m) ** 2 for x in window_slice) / (n - self.ddof)
         return math.sqrt(var)
