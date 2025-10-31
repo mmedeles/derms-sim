@@ -24,9 +24,11 @@ from typing import Optional
 
 import pandas as pd
 
+
 from comm.mqtt_client import MQTTClient
 from .moving_avg import Node_MA # relative import??????
 from .data_adjust import data_adjust
+from .ml_models import RF_Classifier
 # ---------------------------------------------------------------------------
 
 def parse_args():
@@ -69,7 +71,8 @@ def _publish_dataframe(
     ma_signal: str,
     ma_field: str,
     std_field: str,
-    adjuster
+    adjuster,
+    model
 ):
     sleep = 1.0 / max(rate, 0.001)
     sent = 0
@@ -88,7 +91,10 @@ def _publish_dataframe(
             std = ma.std()
             payload[ma_field] = float(avg)
             payload[std_field] = float(std)
-            
+            payload['is_anom'] = model.classify([ma.average(60),ma.average(120),ma.average(180),ma.average(240),ma.std(60),ma.std(120)])
+        else:
+            print("error")
+            exit
         if printed < 5:
             preview = json.dumps(payload, default=str)
             if len(preview) > 240:
@@ -121,6 +127,7 @@ def _one_pass(
     ma_signal: str,
     ma_field: str,
     std_field: str,
+    model, #variable model object
 ):
     g = data_adjust(magnitude=0.01,method="gaussian",period=300) #magnitude-peak height,  method-shape of bump,  period-width   
     total = 0
@@ -136,7 +143,8 @@ def _one_pass(
             ma_signal,
             ma_field,
             std_field,
-            g
+            g,
+            model
         )
         if limit is not None and total >= limit:
             break
@@ -154,7 +162,11 @@ def main():
     ma = Node_MA(n=args.ma_window, ddof=args.std_ddof) if use_ma else None
     ma_field = args.ma_field or (f"moving_avg_{args.ma_signal}" if use_ma else "")
     std_field = args.std_field or (f"moving_std_{args.ma_signal}" if use_ma else "")
-
+    #if arg something:
+        #model = XGB_Classifier()
+    #if arg something
+        #model = LSTM_Classifier()
+    model = RF_Classifier()
     print(
         f"[replay] starting\n"
         f"  csv          = {csv_path}\n"
@@ -165,6 +177,7 @@ def main():
         f"  chunksize    = {args.chunksize}\n"
         f"  loop         = {args.loop}\n"
         f"  moving_stats = {'ON' if use_ma else 'OFF'}"
+        #f"  model = {args.model}\n"
         f"{'' if not use_ma else f' (signal={args.ma_signal}, window={args.ma_window}, avg_field={ma_field}, std_field={std_field})'}\n"
     )
 
@@ -178,7 +191,7 @@ def main():
                 print(f"[replay] pass #{pass_idx}")
                 _one_pass(
                     csv_path, args.chunksize, mqc, args.topic_prefix, args.rate,
-                    args.limit, ma, args.ma_signal, ma_field, std_field
+                    args.limit, ma, args.ma_signal, ma_field, std_field, model
                 )
                 if args.limit is not None:
                     break
@@ -186,7 +199,7 @@ def main():
         else:
             _one_pass(
                 csv_path, args.chunksize, mqc, args.topic_prefix, args.rate,
-                args.limit, ma, args.ma_signal, ma_field, std_field
+                args.limit, ma, args.ma_signal, ma_field, std_field, model
             )
     except KeyboardInterrupt:
         print("\n[replay] interrupted by user")
