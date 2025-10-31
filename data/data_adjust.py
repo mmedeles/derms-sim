@@ -1,4 +1,5 @@
 import numpy as np
+from random import randint
 class data_adjust:
     def __init__(self, magnitude, method, period=360,sigma=None):
         self.M=magnitude
@@ -12,7 +13,9 @@ class data_adjust:
     def adjust(self):
         self.t+=1
         if self.t>=self.period:
-            self.t=0
+            self.t=randint(-1000,-10)
+        if self.t<0:
+            return 0
         return self.method()
     
     def gaussian_adjust(self):
