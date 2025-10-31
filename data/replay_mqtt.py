@@ -83,18 +83,17 @@ def _publish_dataframe(
         topic = f"{topic_prefix}/{node}/telemetry"
 
         payload = {k: v for k, v in row.dropna().to_dict().items()}
-        payload["Hz_adjusted"] = row.get(ma_signal) + adjuster.adjust()
+        adjusted_value = row.get(ma_signal) + adjuster.adjust()
+        payload["Hz_adjusted"] = adjusted_value
         
         # add moving stats if enabled
         if ma is not None:
-            avg = ma.update(row.get(ma_signal))
+            avg = ma.update(adjusted_value)
             std = ma.std()
             payload[ma_field] = float(avg)
             payload[std_field] = float(std)
             payload['is_anom'] = model.classify([ma.average(60),ma.average(120),ma.average(180),ma.average(240),ma.std(60),ma.std(120)])
-        else:
-            print("error")
-            exit
+
         if printed < 5:
             preview = json.dumps(payload, default=str)
             if len(preview) > 240:
