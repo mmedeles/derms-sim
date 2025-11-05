@@ -92,7 +92,15 @@ def _publish_dataframe(
             std = ma.std()
             payload[ma_field] = float(avg)
             payload[std_field] = float(std)
-            payload['is_anom'] = model.classify([ma.average(60),ma.average(120),ma.average(180),ma.average(240),ma.std(60),ma.std(120)])
+            
+            ma60_val = ma.average(60)
+            ma120_val = ma.average(120)
+            ma180_val = ma.average(180)
+            ma240_val = ma.average(240)
+            
+            is_anom = model.classify([adjusted_value, ma60_val, ma120_val, ma180_val, ma240_val])
+            payload['is_anom'] = is_anom
+            
 
         if printed < 5:
             preview = json.dumps(payload, default=str)
@@ -126,9 +134,9 @@ def _one_pass(
     ma_signal: str,
     ma_field: str,
     std_field: str,
-    model, #variable model object
+    model,
 ):
-    g = data_adjust(magnitude=0.01,method="gaussian",period=300) #magnitude-peak height,  method-shape of bump,  period-width   
+    g = data_adjust(magnitude=0.01,method="gaussian",period=300)  
     total = 0
     for chunk in pd.read_csv(csv_path, chunksize=chunksize):
         _validate_columns(chunk, need_ma=ma is not None, ma_signal=ma_signal)
@@ -149,7 +157,6 @@ def _one_pass(
             break
     return total
 
-# ---------------------------------------------------------------------------
 
 def main():
     args = parse_args()
