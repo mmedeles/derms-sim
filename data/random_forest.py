@@ -97,12 +97,14 @@ def train_model(df: pd.DataFrame, n_estimators: int, test_size: float, random_st
     
     # Train Random Forest
     print(f"[train] Training Random Forest with {n_estimators} trees...")
+    print("[train] Using class_weight='balanced' to handle imbalanced data")
     model = RandomForestClassifier(
         n_estimators=n_estimators,
         random_state=random_state,
-        max_depth=10,
-        min_samples_split=10,
-        min_samples_leaf=5,
+        class_weight='balanced', 
+        max_depth=None,                
+        min_samples_split=5,           
+        min_samples_leaf=2,            
         n_jobs=-1
     )
     
@@ -198,3 +200,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
