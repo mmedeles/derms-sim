@@ -5,7 +5,7 @@ ML model classifiers for anomaly detection.
 import pickle
 from pathlib import Path
 import numpy as np
-
+import pandas as pd
 class RF_Classifier:
     """Random Forest anomaly classifier using moving average deviations."""
     
@@ -85,6 +85,50 @@ class RF_Classifier:
                 return deviation > 0.005
             return False
 
+class SVM_Classifier:
+    """Support Vector Machine anomaly classifier using moving average and moving deviation."""
+    
+    def __init__(self, model_path="models/svm.joblib",scaler_path = "models/scaler.joblib"):
+        
+        """Load the trained SVM model."""
+        model_file = Path(model_path)
+        
+        if not model_file.exists():
+            print("svm model not found")
+            exit()
+        else:
+            from joblib import load
+            #from sklearn.svm import SVC
+            self.svm = load(model_path)
+            #from sklearn.preprocessing import StandardScaler
+            self.scaler = load(scaler_path)
 
+            
+            print(f"[SVM_Classifier] Successfully loaded SVM from {model_path}")
+
+    
+    def classify(self, x) -> bool:
+        """
+        Classify a sample as anomaly (True) or normal (False).
+        
+        Args:
+            x: List of [ma60, ma120, ma180, ma240, ms60, ms120]
+               First element is current Hz, rest are moving averages
+        
+        Returns:
+            bool: True if anomaly, False if normal
+        """
+        try:
+            if x[0]==0: #nighttime
+                return False
+            df_x = pd.DataFrame([x[1:]],columns=["ma60","ma120","ma180","ma240","ms60","ms120"])
+                
+            scaled_x = self.scaler.transform(df_x)
+            prediction = self.svm.predict(scaled_x)
+            return int(prediction[0])
+        except Exception as e:
+            print(f"[RF_Classifier] ERROR during classification: {e}")
+            print(f"[RF_Classifier] Input was: {x}")
+            return False
 #class XGB_Classifer:
 #class LSTM_Classifier:

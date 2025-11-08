@@ -29,6 +29,7 @@ from comm.mqtt_client import MQTTClient
 from .moving_avg import Node_MA # relative import??????
 from .data_adjust import data_adjust
 from .ml_models import RF_Classifier
+from .ml_models import SVM_Classifier
 # ---------------------------------------------------------------------------
 
 def parse_args():
@@ -72,7 +73,8 @@ def _publish_dataframe(
     ma_field: str,
     std_field: str,
     adjuster,
-    model
+    model,
+    model2
 ):
     sleep = 1.0 / max(rate, 0.001)
     sent = 0
@@ -98,8 +100,10 @@ def _publish_dataframe(
             ma180_val = ma.average(180)
             ma240_val = ma.average(240)
             
-            is_anom = model.classify([adjusted_value, ma60_val, ma120_val, ma180_val, ma240_val])
+            is_anom = model.classify([adjusted_value, ma60_val, ma120_val, ma180_val, ma240_val, ma.std(60), ma.std(120)])
+            is_anom2 = model2.classify([adjusted_value, ma60_val, ma120_val, ma180_val, ma240_val, ma.std(60), ma.std(120)])
             payload['is_anom'] = is_anom
+            payload['is_anom2'] = is_anom2
             
 
         if printed < 5:
@@ -135,8 +139,9 @@ def _one_pass(
     ma_field: str,
     std_field: str,
     model,
+    model2
 ):
-    g = data_adjust(magnitude=0.01,method="gaussian",period=300)  
+    g = data_adjust(magnitude=0.05,method="gaussian",period=300)  
     total = 0
     for chunk in pd.read_csv(csv_path, chunksize=chunksize):
         _validate_columns(chunk, need_ma=ma is not None, ma_signal=ma_signal)
@@ -151,7 +156,9 @@ def _one_pass(
             ma_field,
             std_field,
             g,
-            model
+            model,
+            model2
+            
         )
         if limit is not None and total >= limit:
             break
@@ -173,6 +180,7 @@ def main():
     #if arg something
         #model = LSTM_Classifier()
     model = RF_Classifier()
+    model2 = SVM_Classifier()
     print(
         f"[replay] starting\n"
         f"  csv          = {csv_path}\n"
@@ -197,7 +205,7 @@ def main():
                 print(f"[replay] pass #{pass_idx}")
                 _one_pass(
                     csv_path, args.chunksize, mqc, args.topic_prefix, args.rate,
-                    args.limit, ma, args.ma_signal, ma_field, std_field, model
+                    args.limit, ma, args.ma_signal, ma_field, std_field, model, model2
                 )
                 if args.limit is not None:
                     break

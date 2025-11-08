@@ -139,7 +139,7 @@ def _get_series_for_node(node_id: str, max_points: int = PLOT_POINTS):
     v     = [float(x.get("voltage", 0.0))   for _, x in parsed]
     f_hz  = [float(x.get("frequency_hz", 0.0)) for _, x in parsed]
 
-    ma_vals, std_vals, adjusted_vals, is_anoms = [], [], [], []
+    ma_vals, std_vals, adjusted_vals, is_anoms, is_anoms2 = [], [], [], [], []
     for _, x in parsed:
         # moving average
         mv = x.get(MA_FIELD)
@@ -152,6 +152,7 @@ def _get_series_for_node(node_id: str, max_points: int = PLOT_POINTS):
             adjusted = None
         ma_vals.append(mv)
         is_anoms.append(x.get("is_anom"))
+        is_anoms2.append(x.get("is_anom2"))
         adjusted_vals.append(adjusted)
         # moving std
         sv = x.get(STD_FIELD)
@@ -161,7 +162,7 @@ def _get_series_for_node(node_id: str, max_points: int = PLOT_POINTS):
             sv = None
         std_vals.append(sv)
 
-    return times, p_kw, v, f_hz, ma_vals, std_vals, adjusted_vals, is_anoms
+    return times, p_kw, v, f_hz, ma_vals, std_vals, adjusted_vals, is_anoms, is_anoms2
 
 def _recent_anomaly_label(node_id: str):
     if node_id in ANOMALIES and len(ANOMALIES[node_id]) > 0:
@@ -211,7 +212,7 @@ def update_ui(_n, selected_node):
         selected_node = options[0]["value"]
 
     if selected_node and selected_node in BUFFER:
-        times, p_kw, v, f_hz, ma_vals, std_vals, adjusted_vals, is_anoms = _get_series_for_node(selected_node, max_points=PLOT_POINTS)
+        times, p_kw, v, f_hz, ma_vals, std_vals, adjusted_vals, is_anoms, is_anoms2 = _get_series_for_node(selected_node, max_points=PLOT_POINTS)
         power_fig = _line_figure("Power (kW)", times, p_kw, "kW")
         volt_fig  = _line_figure("Voltage (V)", times, v, "V")
         freq_fig  = _line_figure("Frequency (Hz)", times, f_hz, "Hz")
@@ -220,7 +221,12 @@ def update_ui(_n, selected_node):
         if any(val is not None for val in ma_vals):
             freq_fig.add_trace(go.Scatter(x=times, y=ma_vals, mode="lines", name="Moving Avg", line=dict(dash="dot")))
         if any(val is not None for val in adjusted_vals):
-            symbols = ['circle' if not anom else "x" for anom in is_anoms]
+            symbol_map={(0,0):"circle",
+                        (1,0):"star",
+                        (0,1):"hexagon",#svm
+                        (1,1):"x"}
+            #symbols = ['circle' if not anom else "x" for anom in is_anoms]
+            symbols = [ symbol_map[pair] for pair in list(zip(is_anoms,is_anoms2))]
             sizes = [20 if anom else 6 for anom in is_anoms]
             colors = ['red' if anom else 'blue' for anom in is_anoms]
             freq_fig.add_trace(go.Scatter(x=times, y=adjusted_vals, 
