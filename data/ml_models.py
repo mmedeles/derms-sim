@@ -6,6 +6,8 @@ import pickle
 from pathlib import Path
 import numpy as np
 import pandas as pd
+from collections import deque
+
 class RF_Classifier:
     """Random Forest anomaly classifier using moving average deviations."""
     
@@ -120,7 +122,7 @@ class SVM_Classifier:
         """
         try:
             if x[0]==0: #nighttime
-                return False
+                return 0
             df_x = pd.DataFrame([x[1:]],columns=["ma60","ma120","ma180","ma240","ms60","ms120"])
                 
             scaled_x = self.scaler.transform(df_x)
@@ -131,4 +133,42 @@ class SVM_Classifier:
             print(f"[RF_Classifier] Input was: {x}")
             return False
 #class XGB_Classifer:
-#class LSTM_Classifier:
+class LSTM_Classifier:
+    """LSTM anomaly classifier using past 240 observations."""
+    
+    def __init__(self, model_path="models/LSTM_model.keras",scaler_path = "models/lstm_scaler.pkl",n=240):
+        self.n=n
+        """Load the trained LSTM model."""
+        model_file = Path(model_path)
+        
+        from tensorflow.keras.models import load_model
+        self.model = load_model(model_path)
+        import pickle
+        with open(scaler_path, "rb") as f:
+            self.scaler = pickle.load(f)
+
+            
+        print(f"[LSTM_Classifier] Successfully loaded LSTM from {model_path}")
+        self.buffer = deque(maxlen=n)
+    
+    def classify(self, x) -> bool:
+        """
+        Args:
+            x: List of last 240 Hz observations
+        Returns:
+            bool: True if anomaly, False if normal
+        """
+        arr = np.array(x).reshape(1,7)
+        arr_scaled = self.scaler.transform(arr)
+        self.buffer.append(arr_scaled[0])
+        
+        #if x[0]==0: #nighttime
+            #return False
+            
+        if len(self.buffer)<self.n:#not enough observations
+            return False  
+        window = np.array(self.buffer)
+        X_input = window.reshape(1,self.n,7)#7 features
+        prediction = self.model.predict(X_input, verbose=0)[0,0]
+
+        return int(prediction > 0.5)

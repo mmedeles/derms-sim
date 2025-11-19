@@ -30,6 +30,7 @@ from .moving_avg import Node_MA # relative import??????
 from .data_adjust import data_adjust
 from .ml_models import RF_Classifier
 from .ml_models import SVM_Classifier
+from .ml_models import LSTM_Classifier
 # ---------------------------------------------------------------------------
 
 def parse_args():
@@ -100,8 +101,8 @@ def _publish_dataframe(
             ma180_val = ma.average(180)
             ma240_val = ma.average(240)
             
-            is_anom = model.classify([adjusted_value, ma60_val, ma120_val, ma180_val, ma240_val, ma.std(60), ma.std(120)])
-            is_anom2 = model2.classify([adjusted_value, ma60_val, ma120_val, ma180_val, ma240_val, ma.std(60), ma.std(120)])
+            is_anom = model.classify([adjusted_value, ma60_val, ma120_val, ma180_val, ma240_val, ma.std(60), ma.std(120)]) #rf
+            is_anom2 = model2.classify([adjusted_value, ma60_val, ma120_val, ma180_val, ma240_val, ma.std(60), ma.std(120)]) #lstm
             payload['is_anom'] = is_anom
             payload['is_anom2'] = is_anom2
             
@@ -180,7 +181,7 @@ def main():
     #if arg something
         #model = LSTM_Classifier()
     model = RF_Classifier()
-    model2 = SVM_Classifier()
+    model2 = LSTM_Classifier()
     print(
         f"[replay] starting\n"
         f"  csv          = {csv_path}\n"
