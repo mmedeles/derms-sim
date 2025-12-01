@@ -120,7 +120,7 @@ MQTT host: localhost • Client: OK • Nodes observed: - waiting -
 
 Continuous? ==> dashboard always has fresh data:
 ```powershell
-python -m data.replay_mqtt --csv data/normalized.csv --rate 20 --host localhost --loop
+python -m data.replay_mqtt --csv data/normalized.csv --rate 20 --host localhost --loop --ma-window 240
 ```
 
 Within a few seconds, the **Node dropdown** should populate (e.g., `inverter_1`),  
