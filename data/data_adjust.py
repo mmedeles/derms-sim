@@ -1,11 +1,12 @@
 import numpy as np
-from random import randint
+from random import randint,seed
 class data_adjust:
     def __init__(self, magnitude, method, period=360,sigma=None):
         self.M=magnitude
         self.t=-1
         self.method = {"gaussian":self.gaussian_adjust,"linear":self.linear_adjust}[method]
         self.period=period
+        seed(0)
         if sigma:
             self.sigma=sigma
         else:

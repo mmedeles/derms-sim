@@ -71,7 +71,7 @@ class RF_Classifier:
             # Returns 0 (normal) or 1 (anomaly)
             prediction = self.model.predict(features)[0]
             
-            return bool(prediction)
+            return int(prediction)
             
         except Exception as e:
             print(f"[RF_Classifier] ERROR during classification: {e}")
@@ -103,7 +103,7 @@ class SVM_Classifier:
             print(f"[SVM_Classifier] Successfully loaded SVM from {model_path}")
 
     
-    def classify(self, x) -> bool:
+    def classify(self, x):
         """
         Classify a sample as anomaly (True) or normal (False).
         
@@ -154,7 +154,7 @@ class XGB_Classifier:
                 self.model = None
                 self.use_fallback = True
     
-    def classify(self, x) -> bool:
+    def classify(self, x):
         """
         Classify a sample as anomaly (True) or normal (False).
         
@@ -210,7 +210,7 @@ class XGB_Classifier:
             # Get prediction from trained model
             prediction = self.model.predict(features)[0]
             
-            return bool(prediction)
+            return prediction
             
         except Exception as e:
             print(f"[XGB_Classifier] ERROR during classification: {e}")
@@ -237,7 +237,7 @@ class LSTM_Classifier:
         print(f"[LSTM_Classifier] Successfully loaded LSTM from {model_path}")
         self.buffer = deque(maxlen=n)
     
-    def classify(self, x) -> bool:
+    def classify(self, x):
         """
         Args:
             x: List of last 240 Hz observations

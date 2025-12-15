@@ -31,6 +31,7 @@ from .data_adjust import data_adjust
 from .ml_models import RF_Classifier
 from .ml_models import SVM_Classifier
 from .ml_models import LSTM_Classifier
+from .ml_models import XGB_Classifier
 # ---------------------------------------------------------------------------
 
 def parse_args():
@@ -74,8 +75,7 @@ def _publish_dataframe(
     ma_field: str,
     std_field: str,
     adjuster,
-    model,
-    model2
+    models
 ):
     sleep = 1.0 / max(rate, 0.001)
     sent = 0
@@ -100,11 +100,12 @@ def _publish_dataframe(
             ma120_val = ma.average(120)
             ma180_val = ma.average(180)
             ma240_val = ma.average(240)
-            
-            is_anom = model.classify([adjusted_value, ma60_val, ma120_val, ma180_val, ma240_val, ma.std(60), ma.std(120)]) #rf
-            is_anom2 = model2.classify([adjusted_value, ma60_val, ma120_val, ma180_val, ma240_val, ma.std(60), ma.std(120)]) #lstm
-            payload['is_anom'] = is_anom
-            payload['is_anom2'] = is_anom2
+            payload['is_anom_rf'] = int(models["rf"].classify([adjusted_value, ma60_val, ma120_val, ma180_val, ma240_val, ma.std(60), ma.std(120)]))
+            payload['is_anom_lstm'] = int(models["lstm"].classify([adjusted_value, ma60_val, ma120_val, ma180_val, ma240_val, ma.std(60), ma.std(120)]))
+            payload['is_anom_svm'] = int(models["svm"].classify([adjusted_value, ma60_val, ma120_val, ma180_val, ma240_val, ma.std(60), ma.std(120)]) )
+            payload['is_anom_xgb'] = int(models["xgb"].classify([adjusted_value, ma60_val, ma120_val, ma180_val, ma240_val, ma.std(60), ma.std(120)]))
+        else:
+            print("moving stats not enabled, some features may not work")
             
 
         if printed < 5:
@@ -113,7 +114,6 @@ def _publish_dataframe(
                 preview = preview[:240] + "...}"
             print(f"[replay] host={mqc.client._host} topic={topic} payload={preview}")
             printed += 1
-
         mqc.publish(topic, payload)
         sent += 1
 
@@ -139,8 +139,7 @@ def _one_pass(
     ma_signal: str,
     ma_field: str,
     std_field: str,
-    model,
-    model2
+    models
 ):
     g = data_adjust(magnitude=0.05,method="gaussian",period=300)  
     total = 0
@@ -157,8 +156,7 @@ def _one_pass(
             ma_field,
             std_field,
             g,
-            model,
-            model2
+            models
             
         )
         if limit is not None and total >= limit:
@@ -176,12 +174,12 @@ def main():
     ma = Node_MA(n=args.ma_window, ddof=args.std_ddof) if use_ma else None
     ma_field = args.ma_field or (f"moving_avg_{args.ma_signal}" if use_ma else "")
     std_field = args.std_field or (f"moving_std_{args.ma_signal}" if use_ma else "")
-    #if arg something:
-        #model = XGB_Classifier()
-    #if arg something
-        #model = LSTM_Classifier()
-    model = RF_Classifier()
-    model2 = LSTM_Classifier()
+
+    models = {
+        "rf": RF_Classifier(),
+        "lstm": LSTM_Classifier(),
+        "svm": SVM_Classifier(),
+        "xgb": XGB_Classifier()}
     print(
         f"[replay] starting\n"
         f"  csv          = {csv_path}\n"
@@ -206,7 +204,7 @@ def main():
                 print(f"[replay] pass #{pass_idx}")
                 _one_pass(
                     csv_path, args.chunksize, mqc, args.topic_prefix, args.rate,
-                    args.limit, ma, args.ma_signal, ma_field, std_field, model, model2
+                    args.limit, ma, args.ma_signal, ma_field, std_field, models
                 )
                 if args.limit is not None:
                     break
@@ -214,7 +212,7 @@ def main():
         else:
             _one_pass(
                 csv_path, args.chunksize, mqc, args.topic_prefix, args.rate,
-                args.limit, ma, args.ma_signal, ma_field, std_field, model
+                args.limit, ma, args.ma_signal, ma_field, std_field, models
             )
     except KeyboardInterrupt:
         print("\n[replay] interrupted by user")
