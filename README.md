@@ -62,6 +62,15 @@ You should see:
 > - `derms/+/anomaly`
 
 ---
+### 5) Train Random Forest model (the file size is too large for github)
+```
+    python -m data.random_forest --train data/mod.csv --save models/rf_model.pkl
+```
+>Evaluate Model
+```
+    python -m data.random_forest --train data/mod.csv --evaluate
+```
+You need an rf_model.pkl file to run the program
 
 ## The Runbook
 
