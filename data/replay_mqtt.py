@@ -21,9 +21,11 @@ import json
 import time
 from pathlib import Path
 from typing import Optional
-
 import pandas as pd
+import threading
 
+# Hours to offset each stream's timestamps by
+STREAM_OFFSETS_HOURS = [0, 24, 48]
 
 from comm.mqtt_client import MQTTClient
 from .moving_avg import Node_MA # relative import??????
@@ -75,17 +77,32 @@ def _publish_dataframe(
     ma_field: str,
     std_field: str,
     adjuster,
-    models
+    models,
+    stream_id,
+    time_offset_hours,
 ):
+    print(f"[DEBUG] _publish_dataframe called with stream_id={stream_id}")  # ← add this
+
     sleep = 1.0 / max(rate, 0.001)
+    time_delta = pd.Timedelta(hours=time_offset_hours)
     sent = 0
     printed = 0
 
     for _, row in df.iterrows():
         node = str(row["node_id"])
         topic = f"{topic_prefix}/{node}/telemetry"
+        #topic = f"{topic_prefix}/stream_{stream_id}/{node}/telemetry"
 
         payload = {k: v for k, v in row.dropna().to_dict().items()}
+
+        if time_offset_hours != 0 and "timestamp" in payload:
+            payload["timestamp"] = str(pd.Timestamp(payload["timestamp"]) + time_delta)
+
+
+        payload["stream_id"] = stream_id
+
+        
+        
         adjusted_value = row.get(ma_signal) + adjuster.adjust()
         payload["Hz_adjusted"] = adjusted_value
         
@@ -117,11 +134,11 @@ def _publish_dataframe(
         mqc.publish(topic, payload)
         sent += 1
 
-        if sent % 1000 == 0:
-            print(f"[replay] sent={sent}")
+        if sent % 2 == 0:
+            print(f"[replay|stream_{stream_id}] sent={sent}")
 
         if limit and sent >= limit:
-            print(f"[replay] sent {sent} messages; exiting")
+            print(f"[replay|stream_{stream_id}] sent {sent} messages; exiting")
             return sent
 
         time.sleep(sleep)
@@ -139,8 +156,11 @@ def _one_pass(
     ma_signal: str,
     ma_field: str,
     std_field: str,
-    models
+    models,
+    stream_id,
+    time_offset_hours,
 ):
+    
     g = data_adjust(magnitude=0.05,method="gaussian",period=300)  
     total = 0
     for chunk in pd.read_csv(csv_path, chunksize=chunksize):
@@ -156,7 +176,9 @@ def _one_pass(
             ma_field,
             std_field,
             g,
-            models
+            models,
+            stream_id=stream_id,
+            time_offset_hours=time_offset_hours,
             
         )
         if limit is not None and total >= limit:
@@ -171,49 +193,53 @@ def main():
         raise FileNotFoundError(f"[replay] CSV not found: {csv_path.resolve()}")
 
     use_ma = args.ma_window is not None and args.ma_window > 0
-    ma = Node_MA(n=args.ma_window, ddof=args.std_ddof) if use_ma else None
+    
     ma_field = args.ma_field or (f"moving_avg_{args.ma_signal}" if use_ma else "")
     std_field = args.std_field or (f"moving_std_{args.ma_signal}" if use_ma else "")
 
-    models = {
-        "rf": RF_Classifier(),
-        "lstm": LSTM_Classifier(),
-        "svm": SVM_Classifier(),
-        "xgb": XGB_Classifier()}
-    print(
-        f"[replay] starting\n"
-        f"  csv          = {csv_path}\n"
-        f"  host:port    = {args.host}:{args.port}\n"
-        f"  topic_prefix = {args.topic_prefix}\n"
-        f"  rate         = {args.rate} msg/s\n"
-        f"  limit        = {args.limit}\n"
-        f"  chunksize    = {args.chunksize}\n"
-        f"  loop         = {args.loop}\n"
-        f"  moving_stats = {'ON' if use_ma else 'OFF'}"
-        #f"  model = {args.model}\n"
-        f"{'' if not use_ma else f' (signal={args.ma_signal}, window={args.ma_window}, avg_field={ma_field}, std_field={std_field})'}\n"
-    )
+    #run_stream function for each stream in a thread
+    def run_stream(stream_id, offset_hours):
+        ma = Node_MA(n=args.ma_window, ddof=args.std_ddof) if use_ma else None
+        models = {
+            "rf":   RF_Classifier(),
+            "lstm": LSTM_Classifier(),
+            "svm":  SVM_Classifier(),
+            "xgb":  XGB_Classifier(),
+        }
+        mqc = MQTTClient(client_id=f"replayer_stream_{stream_id}", host=args.host, port=args.port)
 
-    mqc = MQTTClient(client_id="replayer", host=args.host, port=args.port)
-
-    try:
         if args.loop:
             pass_idx = 0
             while True:
                 pass_idx += 1
-                print(f"[replay] pass #{pass_idx}")
+                print(f"[replay] pass #{pass_idx} stream_{stream_id}")
                 _one_pass(
                     csv_path, args.chunksize, mqc, args.topic_prefix, args.rate,
-                    args.limit, ma, args.ma_signal, ma_field, std_field, models
+                    args.limit, ma, args.ma_signal, ma_field, std_field, models,
+                    stream_id=stream_id, time_offset_hours=offset_hours,
                 )
                 if args.limit is not None:
                     break
                 time.sleep(0.5)
         else:
+            print(f"[replay] stream_{stream_id} offset=+{offset_hours}h")
             _one_pass(
                 csv_path, args.chunksize, mqc, args.topic_prefix, args.rate,
-                args.limit, ma, args.ma_signal, ma_field, std_field, models
+                args.limit, ma, args.ma_signal, ma_field, std_field, models,
+                stream_id=stream_id, time_offset_hours=offset_hours,
             )
+
+
+    try:
+        threads = [
+            threading.Thread(target=run_stream, args=(stream_id, offset_hours), daemon=True)
+            for stream_id, offset_hours in enumerate(STREAM_OFFSETS_HOURS)
+        ]
+        for t in threads:
+            t.start()
+        while any(t.is_alive() for t in threads):
+            for t in threads:
+                t.join(timeout=1.0)  # wake up every second to check for Ctrl+C
     except KeyboardInterrupt:
         print("\n[replay] interrupted by user")
     except Exception as e:
@@ -221,6 +247,7 @@ def main():
         raise
     finally:
         print("[replay] done.")
+
 
 if __name__ == "__main__":
     main()
