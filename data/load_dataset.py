@@ -36,7 +36,18 @@ def pick_col(df, preferred, aliases, default=None, required=False, note=""):
     for name in candidates:
         key = name.lower().strip()
         if key in cols:
-            return pd.to_numeric(df[cols[key]], errors="ignore")  # numeric where possible
+            s = df[cols[key]]
+
+            # If it's already numeric, keep it
+            if pd.api.types.is_numeric_dtype(s):
+                return s
+
+            # Try to coerce to numeric; if that makes everything NaN, fall back to original
+            coerced = pd.to_numeric(s, errors="coerce")
+            if coerced.notna().any():
+                return coerced
+
+            return s
     if required:
         raise KeyError(f"Required column not found ({note}). Tried: {candidates}. CSV has: {list(df.columns)[:25]}...")
     # fallback default
