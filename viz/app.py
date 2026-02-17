@@ -118,7 +118,7 @@ def _extract_stream_node(topic: str, payload: Dict[str, Any]) -> Tuple[str, str]
 
     # payload values first if present
     node_id = str(payload.get("node_id") or "unknown")
-    stream_id = str(payload.get("stream_id") or "")
+    stream_id = str(payload.get("stream_id", ""))
 
     # topic parsing fallback
     # Expected: ["derms", "<stream_id>", "<node_id>", "telemetry"]
@@ -204,6 +204,7 @@ def _start_mqtt():
     client = mqtt.Client(client_id="viz_ui", protocol=mqtt.MQTTv311)
 
     def on_connect(_c, _u, _flags, rc):
+        global MQTT_CONNECTED
         nonlocal client
         MQTT_CONNECTED = (rc == 0)
         if rc != 0:
@@ -221,6 +222,7 @@ def _start_mqtt():
         )
 
     def on_disconnect(_c, _u, rc):
+        global MQTT_CONNECTED
         MQTT_CONNECTED = False
         if rc != 0:
             print(f"[viz] MQTT disconnected rc={rc}")
@@ -265,7 +267,11 @@ def _start_mqtt():
 
 
 threading.Thread(target=_start_mqtt, daemon=True).start()
-
+import time
+time.sleep(2)  # give MQTT thread time to connect
+print(f"[DEBUG] MQTT_CONNECTED = {MQTT_CONNECTED}")
+print(f"[DEBUG] KNOWN_NODES = {KNOWN_NODES}")
+print(f"[DEBUG] BUFFER keys = {list(BUFFER.keys())}")
 
 # ------------------------------------------------------------------------------
 # Dash app
@@ -634,7 +640,12 @@ def update_ui(_n, selected_node, time_mode, strip_window_sec):
         is_anom_svm,
         is_anom_xgb,
     ) = _get_series_for_node(selected_node, time_mode=time_mode, max_points=PLOT_POINTS)
-
+    print(f"[DEBUG] selected_node = {selected_node}")
+    print(f"[DEBUG] BUFFER keys = {list(BUFFER.keys())}")
+    print(f"[DEBUG] times has {len(times)} points")
+    if selected_node in BUFFER and len(BUFFER[selected_node]) > 0:
+        print(f"[DEBUG] Last msg stream_id = {list(BUFFER[selected_node])[-1].get('stream_id')}")
+        
     if not times:
         banner_style = {"padding": "6px 10px", "borderRadius": "8px", "backgroundColor": "#fef3c7", "color": "#92400e"}
         return (
