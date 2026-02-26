@@ -74,12 +74,18 @@ def parse_args():
     ap.add_argument("--std-ddof", type=int, default=1, help="ddof for sample std (default 1)")
 
     # Anomaly injection
-    ap.add_argument("--anomaly-mode", choices=["none", "random", "pulse", "both"], default="none")
+    ap.add_argument("--anomaly-mode", choices=["none", "random", "pulse", "both", "step", "drift"], default="none")
     ap.add_argument("--random-prob", type=float, default=0.0, help="Random anomaly probability per message (0..1)")
     ap.add_argument("--random-mag", type=float, default=0.05, help="Magnitude added to ma_signal when random anomaly fires")
     ap.add_argument("--pulse-period", type=int, default=300, help="Pulse anomaly period in messages")
     ap.add_argument("--pulse-duration", type=int, default=20, help="Pulse anomaly duration in messages")
     ap.add_argument("--pulse-mag", type=float, default=0.08, help="Pulse anomaly magnitude added to ma_signal")
+    ap.add_argument("--step-start", type=int, default=200, help="Step anomaly start index in messages")
+    ap.add_argument("--step-duration", type=int, default=80, help="Step anomaly duration in messages")
+    ap.add_argument("--step-mag", type=float, default=0.08, help="Step anomaly magnitude added to ma_signal")
+    ap.add_argument("--drift-start", type=int, default=200, help="Drift anomaly start index in messages")
+    ap.add_argument("--drift-duration", type=int, default=300, help="Drift anomaly duration in messages")
+    ap.add_argument("--drift-mag", type=float, default=0.12, help="Max drift anomaly magnitude added to ma_signal")
 
     return ap.parse_args()
 
@@ -125,6 +131,12 @@ def _inject_anomaly(
     pulse_period: int,
     pulse_duration: int,
     pulse_mag: float,
+    step_start: int,
+    step_duration: int,
+    step_mag: float,
+    drift_start: int,
+    drift_duration: int,
+    drift_mag: float,
 ) -> Tuple[float, int, str, float]:
     """
     Returns (value, gt_anomaly, anomaly_type, anomaly_mag)
@@ -136,6 +148,31 @@ def _inject_anomaly(
 
     do_random = mode in ("random", "both") and rnd_prob > 0.0
     do_pulse = mode in ("pulse", "both") and pulse_period > 0 and pulse_duration > 0
+    do_step = mode == "step" and step_duration > 0
+    do_drift = mode == "drift" and drift_duration > 0
+
+    # step: constant offset for [start, start+duration)
+    if do_step:
+        step_end = step_start + step_duration
+        if step_start <= idx_msg < step_end:
+            gt = 1
+            a_type = "step"
+            a_mag = float(step_mag)
+            v = base_value + a_mag
+
+    # drift: linear ramp from 0..drift_mag across [start, start+duration)
+    if do_drift:
+        drift_end = drift_start + drift_duration
+        if drift_start <= idx_msg < drift_end:
+            if drift_duration == 1:
+                delta = float(drift_mag)
+            else:
+                progress = (idx_msg - drift_start) / (drift_duration - 1)
+                delta = float(drift_mag) * progress
+            gt = 1
+            a_type = "drift"
+            a_mag = delta
+            v = base_value + delta
 
     # pulse: on for [0..duration) each period
     if do_pulse:
@@ -207,6 +244,12 @@ def _publish_dataframe(
             pulse_period=anomaly_cfg["pulse_period"],
             pulse_duration=anomaly_cfg["pulse_duration"],
             pulse_mag=anomaly_cfg["pulse_mag"],
+            step_start=anomaly_cfg["step_start"],
+            step_duration=anomaly_cfg["step_duration"],
+            step_mag=anomaly_cfg["step_mag"],
+            drift_start=anomaly_cfg["drift_start"],
+            drift_duration=anomaly_cfg["drift_duration"],
+            drift_mag=anomaly_cfg["drift_mag"],
         )
         msg_idx += 1
 
@@ -324,6 +367,12 @@ def main():
         "pulse_period": int(args.pulse_period),
         "pulse_duration": int(args.pulse_duration),
         "pulse_mag": float(args.pulse_mag),
+        "step_start": int(args.step_start),
+        "step_duration": int(args.step_duration),
+        "step_mag": float(args.step_mag),
+        "drift_start": int(args.drift_start),
+        "drift_duration": int(args.drift_duration),
+        "drift_mag": float(args.drift_mag),
     }
 
     print(
