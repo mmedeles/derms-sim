@@ -86,6 +86,10 @@ def parse_args():
     ap.add_argument("--drift-start", type=int, default=200, help="Drift anomaly start index in messages")
     ap.add_argument("--drift-duration", type=int, default=300, help="Drift anomaly duration in messages")
     ap.add_argument("--drift-mag", type=float, default=0.12, help="Max drift anomaly magnitude added to ma_signal")
+    ap.add_argument("--attack-nodes", type=str, default="", help="Comma-separated node IDs to receive anomaly injection")
+    ap.add_argument("--emit-total", action="store_true", help="Publish aggregated total node per timestamp")
+    ap.add_argument("--total-node-id", default="total_1", help="Node ID for aggregated total stream output")
+    ap.add_argument("--total-type", default="aggregate", help="Type field for aggregated total stream output")
 
     return ap.parse_args()
 
@@ -194,13 +198,87 @@ def _inject_anomaly(
     return v, gt, a_type, float(a_mag)
 
 
+def _publish_total_payload(
+    mqc: MQTTClient,
+    topic_prefix: str,
+    stream_id: str,
+    time_offset_hours: int,
+    total_node_id: str,
+    total_type: str,
+    ma_total: Optional[Node_MA],
+    ma_field: str,
+    std_field: str,
+    models,
+    total_state: Dict[str, Any],
+):
+    if total_state["current_ts"] is None:
+        return
+
+    topic = f"{topic_prefix}/{stream_id}/{total_node_id}/telemetry"
+    accum_power = float(total_state["accum_power"])
+    accum_power_for_freq = float(total_state["accum_power_for_freq"])
+    frequency_hz = (
+        float(total_state["accum_weighted_freq"]) / accum_power_for_freq
+        if accum_power_for_freq > 0.0 else 60.0
+    )
+
+    payload: Dict[str, Any] = {
+        "timestamp": total_state["current_ts"],
+        "node_id": total_node_id,
+        "type": total_type,
+        "power_kw": accum_power,
+        "frequency_hz": float(frequency_hz),
+        "gt_anomaly": int(total_state["any_gt_anom"]),
+        "anomaly_type": "aggregate" if total_state["any_gt_anom"] else "none",
+        "anomaly_mag": float(total_state["max_anom_mag"]),
+        "stream_id": stream_id,
+    }
+    _apply_timestamp_offset(payload, time_offset_hours)
+
+    total_adjusted = float(payload["frequency_hz"])
+    payload["Hz_adjusted"] = total_adjusted
+
+    if ma_total is not None:
+        avg = ma_total.update(total_adjusted)
+        std = ma_total.std()
+        payload[ma_field] = float(avg)
+        payload[std_field] = float(std)
+
+        ma60_val = ma_total.average(60)
+        ma120_val = ma_total.average(120)
+        ma180_val = ma_total.average(180)
+        ma240_val = ma_total.average(240)
+
+        feats = [total_adjusted, ma60_val, ma120_val, ma180_val, ma240_val, ma_total.std(60), ma_total.std(120)]
+        payload["is_anom_rf"] = int(models["rf"].classify(feats))
+        payload["is_anom_lstm"] = int(models["lstm"].classify(feats))
+        payload["is_anom_svm"] = int(models["svm"].classify(feats))
+        payload["is_anom_xgb"] = int(models["xgb"].classify(feats))
+    else:
+        payload.setdefault("is_anom_rf", 0)
+        payload.setdefault("is_anom_lstm", 0)
+        payload.setdefault("is_anom_svm", 0)
+        payload.setdefault("is_anom_xgb", 0)
+
+    if not total_state.get("printed_preview", False):
+        preview = json.dumps(payload, default=str)
+        if len(preview) > 260:
+            preview = preview[:260] + "...}"
+        print(f"[replay] topic={topic} payload={preview}")
+        total_state["printed_preview"] = True
+
+    mqc.publish(topic, payload)
+
+
 def _publish_dataframe(
     df: pd.DataFrame,
     mqc: MQTTClient,
     topic_prefix: str,
     rate: float,
     limit: Optional[int],
-    ma: Optional[Node_MA],
+    ma_by_node: Optional[Dict[str, Node_MA]],
+    ma_window: int,
+    std_ddof: int,
     ma_signal: str,
     ma_field: str,
     std_field: str,
@@ -209,6 +287,11 @@ def _publish_dataframe(
     stream_id: str,
     time_offset_hours: int,
     anomaly_cfg: Dict[str, Any],
+    emit_total: bool,
+    total_node_id: str,
+    total_type: str,
+    ma_total: Optional[Node_MA],
+    total_state: Optional[Dict[str, Any]],
 ):
     sleep = 1.0 / max(rate, 0.001)
     sent = 0
@@ -218,6 +301,32 @@ def _publish_dataframe(
     for _, row in df.iterrows():
         node = str(row["node_id"])
         topic = f"{topic_prefix}/{stream_id}/{node}/telemetry"
+        ts_raw = row.get("timestamp")
+
+        if emit_total and total_state is not None:
+            if total_state["current_ts"] is None:
+                total_state["current_ts"] = ts_raw
+            elif ts_raw != total_state["current_ts"]:
+                _publish_total_payload(
+                    mqc=mqc,
+                    topic_prefix=topic_prefix,
+                    stream_id=stream_id,
+                    time_offset_hours=time_offset_hours,
+                    total_node_id=total_node_id,
+                    total_type=total_type,
+                    ma_total=ma_total,
+                    ma_field=ma_field,
+                    std_field=std_field,
+                    models=models,
+                    total_state=total_state,
+                )
+                total_state["current_ts"] = ts_raw
+                total_state["accum_power"] = 0.0
+                total_state["accum_weighted_freq"] = 0.0
+                total_state["accum_power_for_freq"] = 0.0
+                total_state["any_gt_anom"] = 0
+                total_state["anom_types"] = set()
+                total_state["max_anom_mag"] = 0.0
 
         payload = {k: v for k, v in row.dropna().to_dict().items()}
 
@@ -235,22 +344,26 @@ def _publish_dataframe(
         adjusted_value = base + adjuster.adjust()
 
         # anomaly injection on adjusted value
-        adjusted_value, gt_anom, anom_type, anom_mag = _inject_anomaly(
-            idx_msg=msg_idx,
-            base_value=adjusted_value,
-            mode=anomaly_cfg["mode"],
-            rnd_prob=anomaly_cfg["random_prob"],
-            rnd_mag=anomaly_cfg["random_mag"],
-            pulse_period=anomaly_cfg["pulse_period"],
-            pulse_duration=anomaly_cfg["pulse_duration"],
-            pulse_mag=anomaly_cfg["pulse_mag"],
-            step_start=anomaly_cfg["step_start"],
-            step_duration=anomaly_cfg["step_duration"],
-            step_mag=anomaly_cfg["step_mag"],
-            drift_start=anomaly_cfg["drift_start"],
-            drift_duration=anomaly_cfg["drift_duration"],
-            drift_mag=anomaly_cfg["drift_mag"],
-        )
+        gt_anom, anom_type, anom_mag = 0, "none", 0.0
+        attack_nodes = anomaly_cfg.get("attack_nodes", set())
+        should_inject = (not attack_nodes) or (node in attack_nodes)
+        if should_inject:
+            adjusted_value, gt_anom, anom_type, anom_mag = _inject_anomaly(
+                idx_msg=msg_idx,
+                base_value=adjusted_value,
+                mode=anomaly_cfg["mode"],
+                rnd_prob=anomaly_cfg["random_prob"],
+                rnd_mag=anomaly_cfg["random_mag"],
+                pulse_period=anomaly_cfg["pulse_period"],
+                pulse_duration=anomaly_cfg["pulse_duration"],
+                pulse_mag=anomaly_cfg["pulse_mag"],
+                step_start=anomaly_cfg["step_start"],
+                step_duration=anomaly_cfg["step_duration"],
+                step_mag=anomaly_cfg["step_mag"],
+                drift_start=anomaly_cfg["drift_start"],
+                drift_duration=anomaly_cfg["drift_duration"],
+                drift_mag=anomaly_cfg["drift_mag"],
+            )
         msg_idx += 1
 
         payload["Hz_adjusted"] = adjusted_value
@@ -258,19 +371,38 @@ def _publish_dataframe(
         payload["anomaly_type"] = anom_type
         payload["anomaly_mag"] = float(anom_mag)
 
+        if emit_total and total_state is not None:
+            try:
+                row_power = float(row.get("power_kw", 0.0))
+            except Exception:
+                row_power = 0.0
+
+            total_state["accum_power"] += row_power
+            total_state["accum_weighted_freq"] += float(adjusted_value) * row_power
+            total_state["accum_power_for_freq"] += row_power
+
+            if int(gt_anom) == 1:
+                total_state["any_gt_anom"] = 1
+                total_state["anom_types"].add(str(anom_type))
+                total_state["max_anom_mag"] = max(total_state["max_anom_mag"], float(anom_mag))
+
         # moving stats + model flags
-        if ma is not None:
-            avg = ma.update(adjusted_value)
-            std = ma.std()
+        if ma_by_node is not None:
+            if node not in ma_by_node:
+                ma_by_node[node] = Node_MA(n=ma_window, ddof=std_ddof)
+            node_ma = ma_by_node[node]
+
+            avg = node_ma.update(adjusted_value)
+            std = node_ma.std()
             payload[ma_field] = float(avg)
             payload[std_field] = float(std)
 
-            ma60_val = ma.average(60)
-            ma120_val = ma.average(120)
-            ma180_val = ma.average(180)
-            ma240_val = ma.average(240)
+            ma60_val = node_ma.average(60)
+            ma120_val = node_ma.average(120)
+            ma180_val = node_ma.average(180)
+            ma240_val = node_ma.average(240)
 
-            feats = [adjusted_value, ma60_val, ma120_val, ma180_val, ma240_val, ma.std(60), ma.std(120)]
+            feats = [adjusted_value, ma60_val, ma120_val, ma180_val, ma240_val, node_ma.std(60), node_ma.std(120)]
             payload["is_anom_rf"] = int(models["rf"].classify(feats))
             payload["is_anom_lstm"] = int(models["lstm"].classify(feats))
             payload["is_anom_svm"] = int(models["svm"].classify(feats))
@@ -311,7 +443,9 @@ def _one_pass(
     topic_prefix: str,
     rate: float,
     limit: Optional[int],
-    ma: Optional[Node_MA],
+    ma_by_node: Optional[Dict[str, Node_MA]],
+    ma_window: int,
+    std_ddof: int,
     ma_signal: str,
     ma_field: str,
     std_field: str,
@@ -319,19 +453,37 @@ def _one_pass(
     stream_id: str,
     time_offset_hours: int,
     anomaly_cfg: Dict[str, Any],
+    emit_total: bool,
+    total_node_id: str,
+    total_type: str,
+    ma_total: Optional[Node_MA],
 ):
     g = data_adjust(magnitude=0.05, method="gaussian", period=300)
+    total_state: Optional[Dict[str, Any]] = None
+    if emit_total:
+        total_state = {
+            "current_ts": None,
+            "accum_power": 0.0,
+            "accum_weighted_freq": 0.0,
+            "accum_power_for_freq": 0.0,
+            "any_gt_anom": 0,
+            "anom_types": set(),
+            "max_anom_mag": 0.0,
+            "printed_preview": False,
+        }
 
     total = 0
     for chunk in pd.read_csv(csv_path, chunksize=chunksize):
-        _validate_columns(chunk, need_ma=ma is not None, ma_signal=ma_signal)
+        _validate_columns(chunk, need_ma=ma_by_node is not None, ma_signal=ma_signal)
         total += _publish_dataframe(
             chunk,
             mqc,
             topic_prefix,
             rate,
             None if limit is None else max(0, limit - total),
-            ma,
+            ma_by_node,
+            ma_window,
+            std_ddof,
             ma_signal,
             ma_field,
             std_field,
@@ -340,9 +492,29 @@ def _one_pass(
             stream_id=stream_id,
             time_offset_hours=time_offset_hours,
             anomaly_cfg=anomaly_cfg,
+            emit_total=emit_total,
+            total_node_id=total_node_id,
+            total_type=total_type,
+            ma_total=ma_total,
+            total_state=total_state,
         )
         if limit is not None and total >= limit:
             break
+
+    if emit_total and total_state is not None and total_state["current_ts"] is not None:
+        _publish_total_payload(
+            mqc=mqc,
+            topic_prefix=topic_prefix,
+            stream_id=stream_id,
+            time_offset_hours=time_offset_hours,
+            total_node_id=total_node_id,
+            total_type=total_type,
+            ma_total=ma_total,
+            ma_field=ma_field,
+            std_field=std_field,
+            models=models,
+            total_state=total_state,
+        )
     return total
 
 
@@ -359,6 +531,7 @@ def main():
     use_ma = args.ma_window is not None and args.ma_window > 0
     ma_field = args.ma_field or (f"moving_avg_{args.ma_signal}" if use_ma else "")
     std_field = args.std_field or (f"moving_std_{args.ma_signal}" if use_ma else "")
+    attack_nodes = {n.strip() for n in args.attack_nodes.split(",") if n.strip()}
 
     anomaly_cfg = {
         "mode": args.anomaly_mode,
@@ -373,6 +546,7 @@ def main():
         "drift_start": int(args.drift_start),
         "drift_duration": int(args.drift_duration),
         "drift_mag": float(args.drift_mag),
+        "attack_nodes": attack_nodes,
     }
 
     print(
@@ -389,12 +563,14 @@ def main():
         f"  moving_stats = {'ON' if use_ma else 'OFF'}"
         f"{'' if not use_ma else f' (signal={args.ma_signal}, window={args.ma_window}, avg_field={ma_field}, std_field={std_field})'}\n"
         f"  anomaly      = {anomaly_cfg}\n"
+        f"  emit_total   = {args.emit_total} (node_id={args.total_node_id}, type={args.total_type})\n"
     )
 
     def run_stream(i: int, offset_h: int):
         stream_id = f"stream_{i}"
 
-        ma = Node_MA(n=args.ma_window, ddof=args.std_ddof) if use_ma else None
+        ma_by_node: Optional[Dict[str, Node_MA]] = {} if use_ma else None
+        ma_total = Node_MA(n=args.ma_window, ddof=args.std_ddof) if use_ma else None
 
         # NOTE: This matches your current approach: each stream loads models independently.
         # If startup becomes slow, you can later move models outside and share across threads.
@@ -419,7 +595,9 @@ def main():
                     args.topic_prefix,
                     args.rate,
                     args.limit,
-                    ma,
+                    ma_by_node,
+                    args.ma_window if args.ma_window is not None else 240,
+                    args.std_ddof,
                     args.ma_signal,
                     ma_field,
                     std_field,
@@ -427,6 +605,10 @@ def main():
                     stream_id=stream_id,
                     time_offset_hours=offset_h,
                     anomaly_cfg=anomaly_cfg,
+                    emit_total=args.emit_total,
+                    total_node_id=args.total_node_id,
+                    total_type=args.total_type,
+                    ma_total=ma_total,
                 )
                 if args.limit is not None:
                     break
@@ -440,7 +622,9 @@ def main():
                 args.topic_prefix,
                 args.rate,
                 args.limit,
-                ma,
+                ma_by_node,
+                args.ma_window if args.ma_window is not None else 240,
+                args.std_ddof,
                 args.ma_signal,
                 ma_field,
                 std_field,
@@ -448,6 +632,10 @@ def main():
                 stream_id=stream_id,
                 time_offset_hours=offset_h,
                 anomaly_cfg=anomaly_cfg,
+                emit_total=args.emit_total,
+                total_node_id=args.total_node_id,
+                total_type=args.total_type,
+                ma_total=ma_total,
             )
 
     threads = []
